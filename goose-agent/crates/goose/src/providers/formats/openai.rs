@@ -15,7 +15,7 @@ use rmcp::model::{
     object, AnnotateAble, CallToolRequestParams, Content, ErrorCode, ErrorData, RawContent, Role,
     Tool,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -31,10 +31,22 @@ type ToolCallData = HashMap<
     ),
 >;
 
+/// Deserialize `arguments` from either a plain JSON string or an inline JSON
+/// object/array.  Some Ollama-served models (e.g. gpt-oss) return the
+/// arguments as a JSON object rather than a JSON-encoded string.
+fn deserialize_arguments<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let value = Value::deserialize(d)?;
+    match value {
+        Value::String(s) => Ok(s),
+        Value::Null => Ok(String::new()),
+        other => serde_json::to_string(&other).map_err(serde::de::Error::custom),
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Default)]
 struct DeltaToolCallFunction {
     name: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_arguments")]
     arguments: String,
 }
 
@@ -522,16 +534,14 @@ pub fn response_to_message(response: &Value) -> anyhow::Result<Message> {
                     .to_string();
 
                 // Get the raw arguments string from the LLM.
-                let arguments_str = tool_call["function"]["arguments"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string();
-
-                // If arguments_str is empty, default to an empty JSON object string.
-                let arguments_str = if arguments_str.is_empty() {
-                    "{}".to_string()
-                } else {
-                    arguments_str
+                // Some providers (e.g. Ollama with gpt-oss) return arguments as
+                // a JSON object rather than a JSON-encoded string.
+                let arguments_str = match &tool_call["function"]["arguments"] {
+                    Value::String(s) if s.is_empty() => "{}".to_string(),
+                    Value::String(s) => s.clone(),
+                    Value::Null => "{}".to_string(),
+                    other => serde_json::to_string(other)
+                        .unwrap_or_else(|_| "{}".to_string()),
                 };
 
                 let standard_fields = ["id", "function", "type", "index"];

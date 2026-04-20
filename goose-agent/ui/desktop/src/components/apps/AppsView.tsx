@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { MainPanelLayout } from '../Layout/MainPanelLayout';
 import { Button } from '../ui/button';
-import { Download, Play, Upload } from 'lucide-react';
-import { exportApp, GooseApp, importApp, listApps } from '../../api';
+import { Download, ExternalLink, Play, Upload } from 'lucide-react';
+import { exportApp, GooseApp, importApp, listApps, previewSession } from '../../api';
 import { useChatContext } from '../../contexts/ChatContext';
 import { formatAppName } from '../../utils/conversionUtils';
 import { errorMessage } from '../../utils/conversionUtils';
@@ -51,6 +51,18 @@ const i18n = defineMessages({
     id: 'appsView.launch',
     defaultMessage: 'Launch',
   },
+  preview: {
+    id: 'appsView.preview',
+    defaultMessage: 'Preview',
+  },
+  previewTitle: {
+    id: 'appsView.previewTitle',
+    defaultMessage: 'App Preview',
+  },
+  previewBuilding: {
+    id: 'appsView.previewBuilding',
+    defaultMessage: 'Building & deploying…',
+  },
 });
 
 const GridLayout = ({ children }: { children: React.ReactNode }) => {
@@ -72,6 +84,8 @@ export default function AppsView() {
   const [apps, setApps] = useState<GooseApp[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
   const chatContext = useChatContext();
   const sessionId = chatContext?.chat.sessionId;
 
@@ -182,6 +196,29 @@ export default function AppsView() {
     }
   };
 
+  const handlePreviewApp = async () => {
+    if (!sessionId) return;
+    setPreviewLoading(true);
+    setPreviewUrl(null);
+    try {
+      const response = await previewSession({
+        path: { session_id: sessionId },
+        throwOnError: true,
+      });
+      const url = (response.data as { deployUrl?: string; deploy_url?: string })?.deployUrl
+        ?? (response.data as { deployUrl?: string; deploy_url?: string })?.deploy_url;
+      if (url) {
+        setPreviewUrl(url);
+      } else {
+        setError('Preview returned no URL');
+      }
+    } catch (err) {
+      setError(errorMessage(err, 'Preview failed'));
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
   const handleDownloadApp = async (app: GooseApp) => {
     try {
       const response = await exportApp({
@@ -263,15 +300,31 @@ export default function AppsView() {
           <div className="flex flex-col page-transition">
             <div className="flex justify-between items-center mb-1">
               <h1 className="text-4xl font-light">{intl.formatMessage(i18n.title)}</h1>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleImportClick}
-                className="flex items-center gap-2"
-              >
-                <Upload className="h-4 w-4" />
-                {intl.formatMessage(i18n.importApp)}
-              </Button>
+              <div className="flex gap-2">
+                {sessionId && (
+                  <Button
+                    variant="default"
+                    size="sm"
+                    onClick={handlePreviewApp}
+                    disabled={previewLoading}
+                    className="flex items-center gap-2"
+                  >
+                    <ExternalLink className="h-4 w-4" />
+                    {previewLoading
+                      ? intl.formatMessage(i18n.previewBuilding)
+                      : intl.formatMessage(i18n.preview)}
+                  </Button>
+                )}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleImportClick}
+                  className="flex items-center gap-2"
+                >
+                  <Upload className="h-4 w-4" />
+                  {intl.formatMessage(i18n.importApp)}
+                </Button>
+              </div>
             </div>
             <div className="mb-4">
               <p className="text-sm text-text-secondary mb-2">
@@ -345,6 +398,32 @@ export default function AppsView() {
           )}
         </div>
       </div>
+      {previewUrl && (
+        <div className="fixed inset-0 z-50 flex flex-col bg-background-primary">
+          <div className="flex items-center justify-between px-4 py-2 border-b bg-background-secondary">
+            <span className="text-sm font-medium">{intl.formatMessage(i18n.previewTitle)}</span>
+            <div className="flex items-center gap-3">
+              <a
+                href={previewUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs text-text-secondary underline truncate max-w-xs"
+              >
+                {previewUrl}
+              </a>
+              <Button variant="ghost" size="sm" onClick={() => setPreviewUrl(null)}>
+                ✕
+              </Button>
+            </div>
+          </div>
+          <iframe
+            src={previewUrl}
+            className="flex-1 w-full border-0"
+            title={intl.formatMessage(i18n.previewTitle)}
+            sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+          />
+        </div>
+      )}
     </MainPanelLayout>
   );
 }

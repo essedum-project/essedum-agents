@@ -11,6 +11,7 @@ mod tunnel;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use dotenvy::dotenv;
 use goose::agents::validate_extensions;
 use goose_mcp::{
     mcp_server_runner::{serve, McpCommand},
@@ -44,6 +45,7 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let _ = dotenv();
     let cli = Cli::parse();
 
     match cli.command {

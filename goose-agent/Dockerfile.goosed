@@ -1,0 +1,21 @@
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl3 \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m -u 1000 goose
+USER goose
+WORKDIR /home/goose
+
+COPY goosed-bin /usr/local/bin/goosed
+
+ENV GOOSE_HOST=0.0.0.0
+ENV GOOSE_PORT=3005
+ENV GOOSE_TLS=false
+
+EXPOSE 3005
+
+ENTRYPOINT ["/usr/local/bin/goosed", "agent"]

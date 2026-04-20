@@ -1,5 +1,6 @@
 use crate::agents::extension::PlatformExtensionContext;
 use crate::agents::mcp_client::{Error, McpClientTrait};
+use crate::agents::platform_extensions::developer::minio;
 use crate::agents::reply_parts::coerce_tool_arguments;
 use crate::agents::tool_execution::ToolCallContext;
 use crate::config::paths::Paths;
@@ -137,9 +138,9 @@ impl AppsManagerClient {
         // Check if clock app exists
         let clock_path = self.apps_dir.join("clock.html");
         if !clock_path.exists() {
-            // Parse and save the default clock app
-            let clock_app = GooseApp::from_html(CLOCK_HTML)?;
-            self.save_app(&clock_app)?;
+            // Write directly without triggering MinIO upload for default initialization
+            fs::write(&clock_path, CLOCK_HTML)
+                .map_err(|e| format!("Failed to write default clock app: {}", e))?;
         }
 
         Ok(())
@@ -175,12 +176,16 @@ impl AppsManagerClient {
         GooseApp::from_html(&html)
     }
 
-    fn save_app(&self, app: &GooseApp) -> Result<(), String> {
+    async fn save_app(&self, session_id: &str, app: &GooseApp) -> Result<(), String> {
         let path = self.apps_dir.join(format!("{}.html", app.resource.name));
 
         let html_content = app.to_html()?;
 
-        fs::write(&path, html_content).map_err(|e| format!("Failed to write app file: {}", e))?;
+        fs::write(&path, html_content.clone())
+            .map_err(|e| format!("Failed to write app file: {}", e))?;
+
+        let path_str = path.to_string_lossy().into_owned();
+        minio::maybe_upload(session_id, path_str, html_content).await;
 
         Ok(())
     }
@@ -413,7 +418,7 @@ impl AppsManagerClient {
             prd: Some(prd),
         };
 
-        self.save_app(&app)?;
+        self.save_app(session_id, &app).await?;
 
         let result = CallToolResult::success(vec![Content::text(format!(
             "Created app '{}'! It should have automatically opened in a new window. You can always find it again in the [Apps] tab.",
@@ -469,7 +474,7 @@ impl AppsManagerClient {
             });
         }
 
-        self.save_app(&app)?;
+        self.save_app(session_id, &app).await?;
 
         let result = CallToolResult::success(vec![Content::text(format!(
             "Updated app '{}' based on your feedback",

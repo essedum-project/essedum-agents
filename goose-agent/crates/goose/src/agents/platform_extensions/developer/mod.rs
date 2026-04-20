@@ -1,4 +1,5 @@
 pub mod edit;
+pub mod minio;
 pub mod shell;
 pub mod tree;
 
@@ -176,7 +177,16 @@ impl McpClientTrait for DeveloperClient {
                 Err(error) => Ok(ShellTool::error_result(&format!("Error: {error}"), None)),
             },
             "write" => match Self::parse_args::<FileWriteParams>(arguments) {
-                Ok(params) => Ok(self.edit_tools.file_write_with_cwd(params, working_dir)),
+                Ok(params) => {
+                    let path = params.path.clone();
+                    let content = params.content.clone();
+                    let session_id = ctx.session_id.clone();
+                    let result = self.edit_tools.file_write_with_cwd(params, working_dir);
+                    if !result.is_error.unwrap_or(false) {
+                        minio::maybe_upload(&session_id, path, content).await;
+                    }
+                    Ok(result)
+                }
                 Err(error) => Ok(CallToolResult::error(vec![Content::text(format!(
                     "Error: {error}"
                 ))

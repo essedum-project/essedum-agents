@@ -498,6 +498,73 @@ async fn get_session_extensions(
     Ok(Json(SessionExtensionsResponse { extensions }))
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewResponse {
+    /// URL of the deployed app served by builder-kit-2
+    pub deploy_url: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/sessions/{session_id}/preview",
+    params(
+        ("session_id" = String, Path, description = "Unique identifier for the session whose files will be deployed")
+    ),
+    responses(
+        (status = 200, description = "Deploy URL returned from builder-kit-2", body = PreviewResponse),
+        (status = 401, description = "Unauthorized - Invalid or missing API key"),
+        (status = 502, description = "builder-kit-2 deploy request failed"),
+        (status = 500, description = "Internal server error or missing BUILDER_KIT2_URL env var")
+    ),
+    security(
+        ("api_key" = [])
+    ),
+    tag = "Session Management"
+)]
+async fn preview_session(
+    Path(session_id): Path<String>,
+) -> Result<Json<PreviewResponse>, ErrorResponse> {
+    let builder_kit2_url = std::env::var("BUILDER_KIT2_URL").map_err(|_| {
+        ErrorResponse::internal("BUILDER_KIT2_URL environment variable is not set")
+    })?;
+
+    let deploy_endpoint = format!(
+        "{}/deploy",
+        builder_kit2_url.trim_end_matches('/')
+    );
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&deploy_endpoint)
+        .json(&serde_json::json!({ "session_id": session_id }))
+        .send()
+        .await
+        .map_err(|e| ErrorResponse::internal(format!("Failed to reach builder-kit-2: {}", e)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(ErrorResponse {
+            message: format!("builder-kit-2 deploy failed (HTTP {}): {}", status, body),
+            status: axum::http::StatusCode::BAD_GATEWAY,
+        });
+    }
+
+    let payload: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| ErrorResponse::internal(format!("Invalid JSON from builder-kit-2: {}", e)))?;
+
+    let deploy_url = payload
+        .get("url")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ErrorResponse::internal("builder-kit-2 response missing 'url' field"))?
+        .to_string();
+
+    Ok(Json(PreviewResponse { deploy_url }))
+}
+
 pub fn routes(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/sessions", get(list_sessions))
@@ -520,6 +587,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
             "/sessions/{session_id}/extensions",
             get(get_session_extensions),
         )
+        .route("/sessions/{session_id}/preview", post(preview_session))
         .with_state(state)
 }
 #[derive(Deserialize, ToSchema)]

@@ -530,6 +530,11 @@ export const exportSession = <ThrowOnError extends boolean = false>(options: Opt
 
 export const getSessionExtensions = <ThrowOnError extends boolean = false>(options: Options<GetSessionExtensionsData, ThrowOnError>) => (options.client ?? client).get<GetSessionExtensionsResponses, GetSessionExtensionsErrors, ThrowOnError>({ url: '/sessions/{session_id}/extensions', ...options });
 
+export const previewSession = <ThrowOnError extends boolean = false>(options: Options<{ path: { session_id: string } }, ThrowOnError>) => (options.client ?? client).post<{ 200: { deployUrl: string } }, { 500: unknown }, ThrowOnError>({
+    url: '/sessions/{session_id}/preview',
+    ...options,
+});
+
 export const forkSession = <ThrowOnError extends boolean = false>(options: Options<ForkSessionData, ThrowOnError>) => (options.client ?? client).post<ForkSessionResponses, ForkSessionErrors, ThrowOnError>({
     url: '/sessions/{session_id}/fork',
     ...options,
