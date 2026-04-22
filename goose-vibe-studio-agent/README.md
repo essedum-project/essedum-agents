@@ -9,7 +9,7 @@ A self-hosted AI agent platform built on [goose-vibe-studio-agent](https://githu
 ```
 ┌─────────────────┐     chat/SSE      ┌──────────────────┐
 │  ESSEDUM UI     │ ────────────────► │  goosed (server) │
-│  (port 8501)    │ ◄──────────────── │  (port 3005)     │
+│                 │ ◄──────────────── │  (port 3005)     │
 └─────────────────┘                   └──────────────────┘
                                                │
                                     writes app files
@@ -35,7 +35,6 @@ A self-hosted AI agent platform built on [goose-vibe-studio-agent](https://githu
 | Service | Dockerfile | Port | Purpose |
 |---------|-----------|------|---------|
 | `goosed` | `Dockerfile.goosed` | `3005` | Core goose agent server |
-| ESSEDUM UI | `Dockerfile.streamlit` | `8501` | Chat interface |
 | vibe-code-builder | `services/vibe-code-builder/Dockerfile` | `8080` | Preview/deploy service (reads from MinIO) |
 
 ---
@@ -152,7 +151,7 @@ X-Secret-Key: <your-secret-key>
 **Start a session:**
 ```bash
 curl -X POST http://localhost:3005/agent/start \
-  -H "X-Secret-Key: sk-1234" \
+  -H "X-Secret-Key: <goose_secret_key>" \
   -H "Content-Type: application/json" \
   -d '{"working_dir": "/tmp"}'
 ```
@@ -160,7 +159,7 @@ curl -X POST http://localhost:3005/agent/start \
 **Send a message (streaming):**
 ```bash
 curl -N -X POST http://localhost:3005/reply \
-  -H "X-Secret-Key: sk-1234" \
+  -H "X-Secret-Key: <goose_secret_key>" \
   -H "Content-Type: application/json" \
   -H "Accept: text/event-stream" \
   -d '{
@@ -178,13 +177,13 @@ curl -N -X POST http://localhost:3005/reply \
 ```bash
 # 1. Upsert config keys
 curl -X POST http://localhost:3005/config/upsert \
-  -H "X-Secret-Key: sk-1234" \
+  -H "X-Secret-Key: <goose_secret_key>" \
   -H "Content-Type: application/json" \
   -d '{"key": "LITELLM_HOST", "value": "http://litellm:4000", "is_secret": false}'
 
 # 2. Set active provider
 curl -X POST http://localhost:3005/agent/update_provider \
-  -H "X-Secret-Key: sk-1234" \
+  -H "X-Secret-Key: <goose_secret_key>" \
   -H "Content-Type: application/json" \
   -d '{"provider": "litellm", "model": "Llama-3.2-3B-Instruct", "session_id": "<id>"}'
 ```
