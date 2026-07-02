@@ -1,4 +1,3 @@
-use super::{parse_frontmatter, Source, SourceKind};
 use crate::agents::extension::PlatformExtensionContext;
 use crate::agents::mcp_client::{Error, McpClientTrait};
 use crate::agents::subagent_handler::{run_subagent_task, OnMessageCallback, SubagentRunParams};
@@ -10,11 +9,14 @@ use crate::config::{Config, GooseMode};
 use crate::providers;
 use crate::recipe::build_recipe::build_recipe_from_template;
 use crate::recipe::local_recipes::load_local_recipe_file;
-use crate::recipe::{Recipe, Settings, RECIPE_FILE_EXTENSIONS};
+use crate::recipe::{Recipe, RecipeParameter, Settings, RECIPE_FILE_EXTENSIONS};
 use crate::session::extension_data::EnabledExtensionsState;
 use crate::session::SessionType;
+use crate::sources::parse_frontmatter;
+use crate::utils::safe_truncate;
 use anyhow::Result;
 use async_trait::async_trait;
+use goose_sdk_types::custom_requests::{SourceEntry, SourceType};
 use rmcp::model::{
     CallToolResult, Content, Implementation, InitializeResult, JsonObject, ListToolsResult, Meta,
     ServerCapabilities, ServerNotification, Tool,
@@ -33,23 +35,16 @@ use tracing::{info, warn};
 
 pub static EXTENSION_NAME: &str = "summon";
 
-fn kind_plural(kind: SourceKind) -> &'static str {
-    match kind {
-        SourceKind::Subrecipe => "Subrecipes",
-        SourceKind::Recipe => "Recipes",
-        SourceKind::Agent => "Agents",
-        _ => "Other",
-    }
-}
+const SUBAGENT_DESCRIPTION_BUDGET: usize = 160;
 
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.chars().count() <= max_len {
-        s.to_string()
-    } else if max_len <= 3 {
-        "...".to_string()
-    } else {
-        let truncated: String = s.chars().take(max_len - 3).collect();
-        format!("{}...", truncated)
+const TASK_LABEL_BUDGET: usize = 60;
+
+fn kind_plural(kind: SourceType) -> &'static str {
+    match kind {
+        SourceType::Subrecipe => "Subrecipes",
+        SourceType::Recipe => "Recipes",
+        SourceType::Agent => "Agents",
+        _ => "Other",
     }
 }
 
@@ -63,6 +58,8 @@ pub struct DelegateParams {
     pub model: Option<String>,
     pub temperature: Option<f32>,
     pub max_turns: Option<usize>,
+    pub context: Option<String>,
+    pub working_dir: Option<String>,
     #[serde(default)]
     pub r#async: bool,
 }
@@ -84,6 +81,16 @@ pub struct CompletedTask {
     pub result: Result<String, String>,
     pub turns_taken: u32,
     pub duration: Duration,
+    pub completed_at: Instant,
+}
+
+/// Result from handle_load_task_result with structured metadata for the caller
+#[derive(Debug)]
+struct TaskLoadResult {
+    content: Vec<Content>,
+    status: &'static str,
+    turns: Option<u32>,
+    duration_secs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -95,8 +102,20 @@ struct AgentMetadata {
     model: Option<String>,
 }
 
-fn parse_agent_content(content: &str, path: PathBuf) -> Option<Source> {
-    let (metadata, body): (AgentMetadata, String) = parse_frontmatter(content)?;
+fn parse_agent_content(content: &str, path: &Path) -> Option<SourceEntry> {
+    let (metadata, body): (AgentMetadata, String) = match parse_frontmatter(content) {
+        Ok(Some(parsed)) => parsed,
+        Ok(None) => return None,
+        Err(e) => {
+            // Missing fields means this file has valid YAML but isn't an agent — skip silently.
+            // Only warn on actual YAML syntax errors.
+            if e.to_string().contains("missing field") {
+                return None;
+            }
+            warn!("Failed to parse agent file {}: {}", path.display(), e);
+            return None;
+        }
+    };
 
     let description = metadata.description.unwrap_or_else(|| {
         let model_info = metadata
@@ -107,20 +126,24 @@ fn parse_agent_content(content: &str, path: PathBuf) -> Option<Source> {
         format!("Agent{}", model_info)
     });
 
-    Some(Source {
+    Some(SourceEntry {
+        source_type: SourceType::Agent,
         name: metadata.name,
-        kind: SourceKind::Agent,
         description,
-        path,
         content: body,
+        path: path.to_string_lossy().into_owned(),
+        global: false,
+        writable: true,
         supporting_files: Vec::new(),
+        properties: std::collections::HashMap::new(),
     })
 }
 
 fn scan_recipes_from_dir(
     dir: &Path,
-    kind: SourceKind,
-    sources: &mut Vec<Source>,
+    kind: SourceType,
+    suppress_config_warnings: bool,
+    sources: &mut Vec<SourceEntry>,
     seen: &mut std::collections::HashSet<String>,
 ) {
     let entries = match std::fs::read_dir(dir) {
@@ -152,16 +175,26 @@ fn scan_recipes_from_dir(
         match Recipe::from_file_path(&path) {
             Ok(recipe) => {
                 seen.insert(name.clone());
-                sources.push(Source {
+                sources.push(SourceEntry {
+                    source_type: kind,
                     name,
-                    kind,
                     description: recipe.description.clone(),
-                    path: path.clone(),
                     content: recipe.instructions.clone().unwrap_or_default(),
+                    path: path.to_string_lossy().into_owned(),
+                    global: false,
+                    writable: true,
                     supporting_files: Vec::new(),
+                    properties: std::collections::HashMap::new(),
                 });
             }
             Err(e) => {
+                // The working directory commonly contains project config like package.json
+                // and tsconfig.json, which parse as valid JSON but lack Recipe fields. In that
+                // case treat them as "not a recipe" rather than warning. Dedicated recipe
+                // directories still warn so a real recipe with a typo is not silently dropped.
+                if suppress_config_warnings && e.to_string().contains("missing field") {
+                    continue;
+                }
                 warn!("Failed to parse recipe {}: {}", path.display(), e);
             }
         }
@@ -170,7 +203,7 @@ fn scan_recipes_from_dir(
 
 fn scan_agents_from_dir(
     dir: &Path,
-    sources: &mut Vec<Source>,
+    sources: &mut Vec<SourceEntry>,
     seen: &mut std::collections::HashSet<String>,
 ) {
     let entries = match std::fs::read_dir(dir) {
@@ -197,7 +230,7 @@ fn scan_agents_from_dir(
             }
         };
 
-        if let Some(source) = parse_agent_content(&content, path) {
+        if let Some(source) = parse_agent_content(&content, &path) {
             if !seen.contains(&source.name) {
                 seen.insert(source.name.clone());
                 sources.push(source);
@@ -206,15 +239,14 @@ fn scan_agents_from_dir(
     }
 }
 
-fn discover_filesystem_sources(working_dir: &Path) -> Vec<Source> {
-    let mut sources: Vec<Source> = Vec::new();
+pub fn discover_filesystem_sources(working_dir: &Path) -> Vec<SourceEntry> {
+    let mut sources: Vec<SourceEntry> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     let home = dirs::home_dir();
     let config = Paths::config_dir();
 
     let local_recipe_dirs: Vec<PathBuf> = vec![
-        working_dir.to_path_buf(),
         working_dir.join(".goose/recipes"),
         working_dir.join(".agents/recipes"),
     ];
@@ -228,6 +260,7 @@ fn discover_filesystem_sources(working_dir: &Path) -> Vec<Source> {
         })
         .chain(
             [
+                home.as_ref().map(|h| h.join(".goose/recipes")),
                 Some(config.join("recipes")),
                 home.as_ref().map(|h| h.join(".agents/recipes")),
             ]
@@ -243,6 +276,7 @@ fn discover_filesystem_sources(working_dir: &Path) -> Vec<Source> {
     ];
 
     let global_agent_dirs: Vec<PathBuf> = [
+        home.as_ref().map(|h| h.join(".goose/agents")),
         home.as_ref().map(|h| h.join(".agents/agents")),
         Some(config.join("agents")),
         home.as_ref().map(|h| h.join(".claude/agents")),
@@ -251,8 +285,16 @@ fn discover_filesystem_sources(working_dir: &Path) -> Vec<Source> {
     .flatten()
     .collect();
 
+    scan_recipes_from_dir(
+        working_dir,
+        SourceType::Recipe,
+        true,
+        &mut sources,
+        &mut seen,
+    );
+
     for dir in local_recipe_dirs {
-        scan_recipes_from_dir(&dir, SourceKind::Recipe, &mut sources, &mut seen);
+        scan_recipes_from_dir(&dir, SourceType::Recipe, false, &mut sources, &mut seen);
     }
 
     for dir in local_agent_dirs {
@@ -260,7 +302,7 @@ fn discover_filesystem_sources(working_dir: &Path) -> Vec<Source> {
     }
 
     for dir in global_recipe_dirs {
-        scan_recipes_from_dir(&dir, SourceKind::Recipe, &mut sources, &mut seen);
+        scan_recipes_from_dir(&dir, SourceType::Recipe, false, &mut sources, &mut seen);
     }
 
     for dir in global_agent_dirs {
@@ -268,6 +310,107 @@ fn discover_filesystem_sources(working_dir: &Path) -> Vec<Source> {
     }
 
     sources
+}
+
+fn build_instructions_with_context(context: &str, instructions: &str) -> String {
+    let mut result = format!("# Reference Context\n\n{}", context);
+    if !instructions.is_empty() {
+        result.push_str(&format!("\n\n# Task Instructions\n\n{}", instructions));
+    }
+    result
+}
+
+fn build_subagent_instructions(session: Option<&crate::session::Session>) -> String {
+    let Some(session) = session else {
+        return String::new();
+    };
+
+    // filter the sources down to what we want even though currently that is what we get
+    let mut sources: Vec<SourceEntry> = discover_filesystem_sources(&session.working_dir)
+        .into_iter()
+        .filter(|s| {
+            matches!(
+                s.source_type,
+                SourceType::Agent | SourceType::Recipe | SourceType::Subrecipe
+            )
+        })
+        .collect();
+
+    // If the session is started from a recipe, also use the subrecipes for
+    // that recipe as delegate targets
+    if let Some(recipe) = session.recipe.as_ref() {
+        if let Some(subs) = recipe.sub_recipes.as_ref() {
+            let mut seen: std::collections::HashSet<String> =
+                sources.iter().map(|s| s.name.clone()).collect();
+            for sr in subs {
+                if !seen.insert(sr.name.clone()) {
+                    continue;
+                }
+                sources.push(SourceEntry {
+                    source_type: SourceType::Subrecipe,
+                    name: sr.name.clone(),
+                    description: sr.description.clone().unwrap_or_default(),
+                    content: String::new(),
+                    path: sr.path.clone(),
+                    global: false,
+                    writable: false,
+                    supporting_files: Vec::new(),
+                    properties: std::collections::HashMap::new(),
+                });
+            }
+        }
+    }
+
+    if sources.is_empty() {
+        return String::new();
+    }
+
+    sources.sort_by(|a, b| (&a.source_type, &a.name).cmp(&(&b.source_type, &b.name)));
+    let subagents: Vec<&SourceEntry> = sources.iter().collect();
+
+    let names = subagents
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut out = String::new();
+    out.push_str(
+        "\n\nThe following named subagents are available in this session and \
+         can be invoked through the `delegate` tool (run as a subagent) or \
+         the `load` tool (read their instructions into your own context):\n",
+    );
+
+    let mut current_kind: Option<SourceType> = None;
+    for s in &subagents {
+        if current_kind != Some(s.source_type) {
+            out.push_str(&format!("\n{}:", kind_plural(s.source_type)));
+            current_kind = Some(s.source_type);
+        }
+        out.push_str(&format!(
+            "\n• {} — {}",
+            s.name,
+            safe_truncate(&s.description, SUBAGENT_DESCRIPTION_BUDGET)
+        ));
+    }
+
+    out.push_str(&format!(
+        "\n\nWhen to call a subagent (one of [{names}]):\n\
+         • `@<name>` in the user's message — always call that subagent.\n\
+         • The user mentions a subagent by name without `@` — infer from \
+         context whether they want it invoked, and if so, call it.\n\
+         • The user's request strongly matches a subagent's description — \
+         call it.\n\n\
+         Calling a subagent normally means `delegate(source: \"<name>\", \
+         instructions: ...)`, which runs it as an isolated subagent and \
+         returns its result. Use `load(source: \"<name>\")` instead if you \
+         only want to read the subagent's instructions into your own \
+         context. For long-running work, pass `async: true` to `delegate` — \
+         it returns a task id immediately, and you collect the result later \
+         with `load(source: \"<task_id>\")`, which waits for completion.",
+    ));
+
+    out
 }
 
 fn round_duration(d: Duration) -> String {
@@ -293,6 +436,13 @@ fn max_background_tasks() -> usize {
         .unwrap_or(5)
 }
 
+fn completed_task_ttl() -> Duration {
+    let secs = Config::global()
+        .get_param::<u64>("GOOSE_COMPLETED_TASK_TTL_SECS")
+        .unwrap_or(600);
+    Duration::from_secs(secs)
+}
+
 fn is_session_id(s: &str) -> bool {
     let parts: Vec<&str> = s.split('_').collect();
     parts.len() == 2 && parts[0].len() == 8 && parts[0].chars().all(|c| c.is_ascii_digit())
@@ -301,7 +451,7 @@ fn is_session_id(s: &str) -> bool {
 pub struct SummonClient {
     info: InitializeResult,
     context: PlatformExtensionContext,
-    source_cache: Mutex<Option<(Instant, PathBuf, Vec<Source>)>>,
+    source_cache: Mutex<Option<(Instant, PathBuf, Vec<SourceEntry>)>>,
     background_tasks: Mutex<HashMap<String, BackgroundTask>>,
     completed_tasks: Mutex<HashMap<String, CompletedTask>>,
     notification_subscribers: Arc<Mutex<Vec<mpsc::Sender<ServerNotification>>>>,
@@ -367,6 +517,11 @@ impl SummonClient {
                     "type": "boolean",
                     "default": false,
                     "description": "For running background tasks: cancel and return output."
+                },
+                "peek": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "For running background tasks: check progress without blocking. Returns turn count, idle time, and recent tool activity."
                 }
             }
         });
@@ -377,11 +532,13 @@ impl SummonClient {
              Call with no arguments to list all available sources (subrecipes, recipes, agents).\n\
              Call with a source name to load its content into your context.\n\
              For background tasks: load(source: \"task_id\") waits for the task and returns the result.\n\
-             To cancel a running task: load(source: \"task_id\", cancel: true) stops and returns output.\n\n\
+             To cancel a running task: load(source: \"task_id\", cancel: true) stops and returns output.\n\
+             To check progress: load(source: \"task_id\", peek: true) returns status without blocking.\n\n\
              Examples:\n\
              - load() → Lists available sources\n\
              - load(source: \"deploy\") → Loads the deploy recipe\n\
-             - load(source: \"20260219_1\") → Waits for background task, then returns result"
+             - load(source: \"20260219_1\") → Waits for background task, then returns result\n\
+             - load(source: \"20260219_1\", peek: true) → Check task progress without waiting"
                 .to_string(),
             schema.as_object().unwrap().clone(),
         )
@@ -426,6 +583,14 @@ impl SummonClient {
                     "minimum": 1,
                     "description": "Maximum turns for this delegate. Overrides recipe settings.max_turns and GOOSE_SUBAGENT_MAX_TURNS."
                 },
+                "context": {
+                    "type": "string",
+                    "description": "Reference context to inject into the delegate's system prompt. Use for background information, file contents, or constraints the delegate needs but that aren't part of the task instructions."
+                },
+                "working_dir": {
+                    "type": "string",
+                    "description": "Working directory for the delegate. Must be within the parent session's working directory. Defaults to the parent's working directory."
+                },
                 "async": {
                     "type": "boolean",
                     "default": false,
@@ -463,11 +628,11 @@ impl SummonClient {
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
     }
 
-    async fn get_sources(&self, session_id: &str, working_dir: &Path) -> Vec<Source> {
+    async fn get_sources(&self, session_id: &str, working_dir: &Path) -> Vec<SourceEntry> {
         let fs_sources = self.get_filesystem_sources(working_dir).await;
 
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut sources: Vec<Source> = Vec::new();
+        let mut sources: Vec<SourceEntry> = Vec::new();
 
         self.add_subrecipes(session_id, &mut sources, &mut seen)
             .await;
@@ -479,11 +644,11 @@ impl SummonClient {
             }
         }
 
-        sources.sort_by(|a, b| (&a.kind, &a.name).cmp(&(&b.kind, &b.name)));
+        sources.sort_by(|a, b| (&a.source_type, &a.name).cmp(&(&b.source_type, &b.name)));
         sources
     }
 
-    async fn get_filesystem_sources(&self, working_dir: &Path) -> Vec<Source> {
+    async fn get_filesystem_sources(&self, working_dir: &Path) -> Vec<SourceEntry> {
         let mut cache = self.source_cache.lock().await;
         if let Some((cached_at, cached_dir, sources)) = cache.as_ref() {
             if cached_dir == working_dir && cached_at.elapsed() < Duration::from_secs(60) {
@@ -500,11 +665,11 @@ impl SummonClient {
         session_id: &str,
         name: &str,
         working_dir: &Path,
-    ) -> Result<Option<Source>, String> {
+    ) -> Result<Option<SourceEntry>, String> {
         let sources = self.get_sources(session_id, working_dir).await;
 
         if let Some(mut source) = sources.iter().find(|s| s.name == name).cloned() {
-            if source.kind == SourceKind::Subrecipe && source.content.is_empty() {
+            if source.source_type == SourceType::Subrecipe && source.content.is_empty() {
                 source.content = self.load_subrecipe_content(session_id, &source.name).await;
             }
             return Ok(Some(source));
@@ -536,21 +701,30 @@ impl SummonClient {
 
         match load_local_recipe_file(&sr.path) {
             Ok(recipe_file) => match Recipe::from_content(&recipe_file.content) {
-                Ok(recipe) => recipe.instructions.unwrap_or_default(),
+                Ok(recipe) => {
+                    let mut content = recipe.instructions.unwrap_or_default();
+                    if let Some(params) = &recipe.parameters {
+                        if !params.is_empty() {
+                            content.push_str("\n\n");
+                            content.push_str(&Self::format_parameters(params));
+                        }
+                    }
+                    content
+                }
                 Err(_) => recipe_file.content,
             },
             Err(_) => String::new(),
         }
     }
 
-    fn discover_filesystem_sources(&self, working_dir: &Path) -> Vec<Source> {
+    fn discover_filesystem_sources(&self, working_dir: &Path) -> Vec<SourceEntry> {
         discover_filesystem_sources(working_dir)
     }
 
     async fn add_subrecipes(
         &self,
         session_id: &str,
-        sources: &mut Vec<Source>,
+        sources: &mut Vec<SourceEntry>,
         seen: &mut std::collections::HashSet<String>,
     ) {
         let session = match self
@@ -576,13 +750,16 @@ impl SummonClient {
 
             let description = self.build_subrecipe_description(sr).await;
 
-            sources.push(Source {
+            sources.push(SourceEntry {
+                source_type: SourceType::Subrecipe,
                 name: sr.name.clone(),
-                kind: SourceKind::Subrecipe,
                 description,
-                path: PathBuf::from(&sr.path),
                 content: String::new(),
+                path: sr.path.clone(),
+                global: false,
+                writable: true,
                 supporting_files: Vec::new(),
+                properties: std::collections::HashMap::new(),
             });
         }
     }
@@ -597,10 +774,8 @@ impl SummonClient {
                 let mut desc = recipe.description.clone();
 
                 if let Some(params) = &recipe.parameters {
-                    let param_names: Vec<&str> = params.iter().map(|p| p.key.as_str()).collect();
-                    if !param_names.is_empty() {
-                        let params_str = param_names.join(", ");
-                        desc = format!("{} (params: {})", desc, params_str);
+                    if !params.is_empty() {
+                        desc = format!("{}\n{}", desc, Self::format_parameters(params));
                     }
                 }
 
@@ -609,6 +784,24 @@ impl SummonClient {
         }
 
         format!("Subrecipe from {}", sr.path)
+    }
+
+    fn format_parameters(params: &[RecipeParameter]) -> String {
+        let mut out = String::from("Parameters:");
+        for p in params {
+            let mut detail = format!("\n  - {} ({}, {})", p.key, p.input_type, p.requirement);
+            if let Some(default) = &p.default {
+                detail.push_str(&format!(", default: \"{}\"", default));
+            }
+            if let Some(options) = &p.options {
+                if !options.is_empty() {
+                    detail.push_str(&format!(", options: [{}]", options.join(", ")));
+                }
+            }
+            detail.push_str(&format!(": {}", p.description));
+            out.push_str(&detail);
+        }
+        out
     }
 
     async fn handle_load(
@@ -629,6 +822,12 @@ impl SummonClient {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+        let peek = arguments
+            .as_ref()
+            .and_then(|args| args.get("peek"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         let working_dir = self.get_working_dir(session_id).await;
 
         if source_name.is_none() {
@@ -641,13 +840,29 @@ impl SummonClient {
         let name = source_name.unwrap();
 
         if is_session_id(name) {
-            let content = self.handle_load_task_result(name, cancel).await?;
+            let task_result = self.handle_load_task_result(name, cancel, peek).await?;
             let mut meta = Meta::new();
             meta.0.insert(
                 "subagent_session_id".to_string(),
                 serde_json::Value::String(name.to_string()),
             );
-            return Ok(CallToolResult::success(content).with_meta(Some(meta)));
+            meta.0.insert(
+                "task_status".to_string(),
+                serde_json::Value::String(task_result.status.to_string()),
+            );
+            if let Some(turns) = task_result.turns {
+                meta.0.insert(
+                    "turns_taken".to_string(),
+                    serde_json::Value::Number(turns.into()),
+                );
+            }
+            if let Some(secs) = task_result.duration_secs {
+                meta.0.insert(
+                    "duration_secs".to_string(),
+                    serde_json::Value::Number(secs.into()),
+                );
+            }
+            return Ok(CallToolResult::success(task_result.content).with_meta(Some(meta)));
         }
 
         self.handle_load_source(session_id, name, &working_dir)
@@ -659,39 +874,103 @@ impl SummonClient {
         &self,
         task_id: &str,
         cancel: bool,
-    ) -> Result<Vec<Content>, String> {
+        peek: bool,
+    ) -> Result<TaskLoadResult, String> {
         let mut completed = self.completed_tasks.lock().await;
 
-        if let Some(task) = completed.remove(task_id) {
-            let status = if task.result.is_ok() {
-                "✓ Completed"
-            } else {
-                "✗ Failed"
+        let completed_entry = if peek {
+            completed.get(task_id).map(|task| {
+                (
+                    task.result.clone(),
+                    task.description.clone(),
+                    task.duration,
+                    task.turns_taken,
+                )
+            })
+        } else {
+            completed.remove(task_id).map(|task| {
+                (
+                    task.result,
+                    task.description,
+                    task.duration,
+                    task.turns_taken,
+                )
+            })
+        };
+
+        if let Some((result, description, duration, turns_taken)) = completed_entry {
+            let status_key = match &result {
+                Ok(_) => "completed",
+                Err(e) if e.starts_with("Task panicked:") => "panicked",
+                Err(_) => "failed",
             };
-            let output = match task.result {
+            let status = match status_key {
+                "completed" => "✓ Completed",
+                "panicked" => "✗ Panicked",
+                _ => "✗ Failed",
+            };
+            let output = match result {
                 Ok(output) => output,
                 Err(error) => format!("Error: {}", error),
             };
-
-            return Ok(vec![Content::text(format!(
-                "# Background Task Result: {}\n\n\
-                 **Task:** {}\n\
-                 **Status:** {}\n\
-                 **Duration:** {} ({} turns)\n\n\
-                 ## Output\n\n{}",
-                task_id,
-                task.description,
-                status,
-                round_duration(task.duration),
-                task.turns_taken,
-                output
-            ))]);
+            return Ok(TaskLoadResult {
+                content: vec![Content::text(format!(
+                    "# Background Task Result: {}\n\n\
+                     **Task:** {}\n\
+                     **Status:** {}\n\
+                     **Duration:** {} ({} turns)\n\n\
+                     ## Output\n\n{}",
+                    task_id,
+                    description,
+                    status,
+                    round_duration(duration),
+                    turns_taken,
+                    output
+                ))],
+                status: status_key,
+                turns: Some(turns_taken),
+                duration_secs: Some(duration.as_secs()),
+            });
         }
 
         drop(completed);
 
         let mut running = self.background_tasks.lock().await;
         if running.contains_key(task_id) {
+            if peek {
+                let task = running.get(task_id).unwrap();
+                let elapsed = task.started_at.elapsed();
+                let turns_taken = task.turns.load(Ordering::Relaxed);
+                let now = current_epoch_millis();
+                let idle_ms = now.saturating_sub(task.last_activity.load(Ordering::Relaxed));
+                let description = task.description.clone();
+
+                let buffered_count = task.notification_buffer.lock().await.len();
+
+                drop(running);
+
+                let mut output = format!(
+                    "# Background Task Status: {}\n\n**Task:** {}\n**Status:** ⏳ Running\n**Elapsed:** {}\n**Turns taken:** {}\n**Idle:** {}\n**Buffered tool calls:** {}",
+                    task_id,
+                    description,
+                    round_duration(elapsed),
+                    turns_taken,
+                    round_duration(Duration::from_millis(idle_ms)),
+                    buffered_count,
+                );
+
+                if buffered_count == 0 && turns_taken == 0 {
+                    output.push_str("\n\n_Task is initialising (no tool activity yet)._");
+                }
+
+                return Ok(TaskLoadResult {
+                    content: vec![Content::text(output)],
+                    status: "running",
+                    turns: Some(turns_taken),
+                    duration_secs: Some(elapsed.as_secs()),
+                });
+            }
+
             if cancel {
                 let task = running.remove(task_id).unwrap();
                 drop(running);
@@ -716,18 +995,23 @@ impl SummonClient {
                     }
                 };
 
-                return Ok(vec![Content::text(format!(
-                    "# Background Task Result: {}\n\n\
-                     **Task:** {}\n\
-                     **Status:** ⊘ Cancelled\n\
-                     **Duration:** {} ({} turns)\n\n\
-                     ## Output\n\n{}",
-                    task_id,
-                    task.description,
-                    round_duration(duration),
-                    turns_taken,
-                    output
-                ))]);
+                return Ok(TaskLoadResult {
+                    content: vec![Content::text(format!(
+                        "# Background Task Result: {}\n\n\
+                         **Task:** {}\n\
+                         **Status:** ⊘ Cancelled\n\
+                         **Duration:** {} ({} turns)\n\n\
+                         ## Output\n\n{}",
+                        task_id,
+                        task.description,
+                        round_duration(duration),
+                        turns_taken,
+                        output
+                    ))],
+                    status: "cancelled",
+                    turns: Some(turns_taken),
+                    duration_secs: Some(duration.as_secs()),
+                });
             }
 
             // Wait for the running task to complete, keeping the tool call
@@ -750,24 +1034,37 @@ impl SummonClient {
 
             tokio::select! {
                 result = &mut task.handle => {
-                    let output = match result {
-                        Ok(Ok(s)) => s,
-                        Ok(Err(e)) => format!("Error: {}", e),
-                        Err(e) => format!("Task panicked: {}", e),
+                    let (output, status_key) = match result {
+                        Ok(Ok(s)) => (s, "completed"),
+                        Ok(Err(e)) => (format!("Error: {}", e), "failed"),
+                        Err(e) => (format!("Task panicked: {}", e), "panicked"),
                     };
 
-                    return Ok(vec![Content::text(format!(
-                        "# Background Task Result: {}\n\n\
-                         **Task:** {}\n\
-                         **Status:** ✓ Completed\n\
-                         **Duration:** {} ({} turns)\n\n\
-                         ## Output\n\n{}",
-                        task_id,
-                        task.description,
-                        round_duration(task.started_at.elapsed()),
-                        task.turns.load(Ordering::Relaxed),
-                        output
-                    ))]);
+                    let turns_taken = task.turns.load(Ordering::Relaxed);
+                    let elapsed = task.started_at.elapsed();
+                    let status_display = match status_key {
+                        "completed" => "✓ Completed",
+                        "panicked" => "✗ Panicked",
+                        _ => "✗ Failed",
+                    };
+                    return Ok(TaskLoadResult {
+                        content: vec![Content::text(format!(
+                            "# Background Task Result: {}\n\n\
+                             **Task:** {}\n\
+                             **Status:** {}\n\
+                             **Duration:** {} ({} turns)\n\n\
+                             ## Output\n\n{}",
+                            task_id,
+                            task.description,
+                            status_display,
+                            round_duration(elapsed),
+                            turns_taken,
+                            output
+                        ))],
+                        status: status_key,
+                        turns: Some(turns_taken),
+                        duration_secs: Some(elapsed.as_secs()),
+                    });
                 }
                 _ = tokio::time::sleep(Duration::from_secs(300)) => {
                     self.background_tasks.lock().await.insert(task_id.to_string(), task);
@@ -827,15 +1124,15 @@ impl SummonClient {
             }
         }
 
-        for kind in [SourceKind::Subrecipe, SourceKind::Recipe, SourceKind::Agent] {
-            let kind_sources: Vec<_> = sources.iter().filter(|s| s.kind == kind).collect();
+        for kind in [SourceType::Subrecipe, SourceType::Recipe, SourceType::Agent] {
+            let kind_sources: Vec<_> = sources.iter().filter(|s| s.source_type == kind).collect();
             if !kind_sources.is_empty() {
                 output.push_str(&format!("\n{}:\n", kind_plural(kind)));
                 for source in kind_sources {
                     output.push_str(&format!(
                         "• {} - {}\n",
                         source.name,
-                        truncate(&source.description, 60)
+                        safe_truncate(&source.description, SUBAGENT_DESCRIPTION_BUDGET)
                     ));
                 }
             }
@@ -861,7 +1158,7 @@ impl SummonClient {
 
                 let output = format!(
                     "# Loaded: {} ({})\n\n{}\n\n---\nThis knowledge is now available in your context.",
-                    source.name, source.kind, content
+                    source.name, source.source_type, content
                 );
 
                 Ok(vec![Content::text(output)])
@@ -954,13 +1251,14 @@ impl SummonClient {
             GooseMode::Auto,
             true, // disable session naming for subagents
             crate::agents::GoosePlatform::GooseCli,
-        );
+        )
+        .with_use_login_shell_path(self.context.use_login_shell_path);
 
         let subagent_session = self
             .context
             .session_manager
             .create_session(
-                working_dir,
+                task_config.parent_working_dir.clone(),
                 "Delegated task".to_string(),
                 SessionType::SubAgent,
                 GooseMode::Auto,
@@ -1031,12 +1329,19 @@ impl SummonClient {
         session_id: &str,
         working_dir: &Path,
     ) -> Result<Recipe, String> {
-        if let Some(source_name) = &params.source {
+        let mut recipe = if let Some(source_name) = &params.source {
             self.build_source_recipe(source_name, params, session_id, working_dir)
-                .await
+                .await?
         } else {
-            self.build_adhoc_recipe(params)
+            self.build_adhoc_recipe(params)?
+        };
+
+        if let Some(ref context) = params.context {
+            let existing = recipe.instructions.unwrap_or_default();
+            recipe.instructions = Some(build_instructions_with_context(context, &existing));
         }
+
+        Ok(recipe)
     }
 
     fn build_adhoc_recipe(&self, params: &DelegateParams) -> Result<Recipe, String> {
@@ -1066,17 +1371,17 @@ impl SummonClient {
             .await?
             .ok_or_else(|| format!("Source '{}' not found", source_name))?;
 
-        let mut recipe = match source.kind {
-            SourceKind::Recipe | SourceKind::Subrecipe => {
+        let mut recipe = match source.source_type {
+            SourceType::Recipe | SourceType::Subrecipe => {
                 self.build_recipe_from_source(&source, params, session_id)
                     .await?
             }
-            SourceKind::Agent => self.build_recipe_from_agent(&source, params)?,
+            SourceType::Agent => self.build_recipe_from_agent(&source, params)?,
             _ => {
                 return Err(format!(
                     "Source '{}' has kind '{}' which cannot be delegated from summon",
-                    source_name, source.kind
-                ))
+                    source_name, source.source_type
+                ));
             }
         };
 
@@ -1094,7 +1399,7 @@ impl SummonClient {
 
     async fn build_recipe_from_source(
         &self,
-        source: &Source,
+        source: &SourceEntry,
         params: &DelegateParams,
         session_id: &str,
     ) -> Result<Recipe, String> {
@@ -1105,7 +1410,7 @@ impl SummonClient {
             .await
             .map_err(|e| format!("Failed to get session: {}", e))?;
 
-        if source.kind == SourceKind::Subrecipe {
+        if source.source_type == SourceType::Subrecipe {
             let sub_recipes = session.recipe.as_ref().and_then(|r| r.sub_recipes.as_ref());
 
             if let Some(sub_recipes) = sub_recipes {
@@ -1142,7 +1447,7 @@ impl SummonClient {
             }
         }
 
-        let recipe_file = load_local_recipe_file(source.path.to_str().unwrap_or(""))
+        let recipe_file = load_local_recipe_file(&source.path)
             .map_err(|e| format!("Failed to load recipe '{}': {}", source.name, e))?;
 
         let param_values: Vec<(String, String)> = params
@@ -1172,18 +1477,19 @@ impl SummonClient {
 
     fn build_recipe_from_agent(
         &self,
-        source: &Source,
+        source: &SourceEntry,
         params: &DelegateParams,
     ) -> Result<Recipe, String> {
-        let agent_content = if source.path.as_os_str().is_empty() {
+        let agent_content = if source.path.is_empty() {
             return Err("Agent source has no path".to_string());
         } else {
             std::fs::read_to_string(&source.path)
                 .map_err(|e| format!("Failed to read agent file: {}", e))?
         };
 
-        let (metadata, _): (AgentMetadata, String) =
-            parse_frontmatter(&agent_content).ok_or("Failed to parse agent frontmatter")?;
+        let (metadata, _): (AgentMetadata, String) = parse_frontmatter(&agent_content)
+            .map_err(|e| format!("Failed to parse agent frontmatter: {}", e))?
+            .ok_or("No frontmatter found in agent file")?;
 
         let model = metadata.model;
 
@@ -1222,7 +1528,7 @@ impl SummonClient {
         recipe: &Recipe,
         session: &crate::session::Session,
     ) -> Result<TaskConfig, anyhow::Error> {
-        let provider = self.resolve_provider(params, recipe, session).await?;
+        let (provider, model_config) = self.resolve_provider(params, recipe, session).await?;
 
         let mut extensions = EnabledExtensionsState::extensions_or_default(
             Some(&session.extension_data),
@@ -1233,7 +1539,20 @@ impl SummonClient {
             if filter.is_empty() {
                 extensions = Vec::new();
             } else {
+                let available_names: Vec<String> =
+                    extensions.iter().map(|ext| ext.name()).collect();
                 extensions.retain(|ext| filter.contains(&ext.name()));
+                let unmatched: Vec<&str> = filter
+                    .iter()
+                    .filter(|name| !available_names.iter().any(|n| n == *name))
+                    .map(String::as_str)
+                    .collect();
+                if !unmatched.is_empty() {
+                    warn!(
+                        "Delegate requested extensions not available in session: {:?}. Available: {:?}",
+                        unmatched, available_names
+                    );
+                }
             }
         }
 
@@ -1250,10 +1569,74 @@ impl SummonClient {
             );
         }
 
-        let task_config = TaskConfig::new(provider, &session.id, &session.working_dir, extensions)
-            .with_max_turns(Some(max_turns));
+        let effective_working_dir = match &params.working_dir {
+            Some(dir) => resolve_working_dir(&session.working_dir, dir)?,
+            None => session.working_dir.clone(),
+        };
+
+        let task_config = TaskConfig::new(
+            provider,
+            model_config,
+            &session.id,
+            &effective_working_dir,
+            extensions,
+        )
+        .with_max_turns(Some(max_turns));
 
         Ok(task_config)
+    }
+
+    fn resolve_model_config(
+        &self,
+        params: &DelegateParams,
+        recipe: &Recipe,
+        session: &crate::session::Session,
+        provider_name: &str,
+    ) -> Result<goose_providers::model::ModelConfig, anyhow::Error> {
+        let mut model_config = session.model_config.clone().map(Ok).unwrap_or_else(|| {
+            crate::model_config::model_config_from_user_config(provider_name, "default")
+        })?;
+
+        let override_model = params
+            .model
+            .clone()
+            .or_else(|| recipe.settings.as_ref().and_then(|s| s.goose_model.clone()))
+            .or_else(|| {
+                Config::global()
+                    .get_param::<String>("GOOSE_SUBAGENT_MODEL")
+                    .ok()
+            });
+
+        if let Some(model) = override_model {
+            if model != model_config.model_name {
+                // Build the new config from scratch so canonical fields
+                // (context_limit, max_tokens, reasoning) and env-derived
+                // overrides (GOOSE_CONTEXT_LIMIT, GOOSE_MAX_TOKENS) match the
+                // overridden model, then preserve session-level state that is
+                // not model-specific from the parent.
+                let parent = model_config;
+                let mut cfg =
+                    crate::model_config::model_config_from_user_config(provider_name, &model)?;
+                cfg.toolshim = parent.toolshim;
+                cfg.toolshim_model = parent.toolshim_model;
+                cfg.temperature = cfg.temperature.or(parent.temperature);
+                if let Some(parent_params) = parent.request_params {
+                    let merged = cfg.request_params.get_or_insert_with(Default::default);
+                    for (k, v) in parent_params {
+                        merged.insert(k, v);
+                    }
+                }
+                model_config = cfg;
+            }
+        }
+
+        if let Some(temp) = params.temperature {
+            model_config = model_config.with_temperature(Some(temp));
+        } else if let Some(temp) = recipe.settings.as_ref().and_then(|s| s.temperature) {
+            model_config = model_config.with_temperature(Some(temp));
+        }
+
+        Ok(model_config)
     }
 
     async fn resolve_provider(
@@ -1261,7 +1644,13 @@ impl SummonClient {
         params: &DelegateParams,
         recipe: &Recipe,
         session: &crate::session::Session,
-    ) -> Result<Arc<dyn crate::providers::base::Provider>, anyhow::Error> {
+    ) -> Result<
+        (
+            Arc<dyn crate::providers::base::Provider>,
+            goose_providers::model::ModelConfig,
+        ),
+        anyhow::Error,
+    > {
         let provider_name = params
             .provider
             .clone()
@@ -1279,30 +1668,9 @@ impl SummonClient {
             .or_else(|| session.provider_name.clone())
             .ok_or_else(|| anyhow::anyhow!("No provider configured"))?;
 
-        let mut model_config = session.model_config.clone().map(Ok).unwrap_or_else(|| {
-            crate::model::ModelConfig::new("default")
-                .map(|c| c.with_canonical_limits(&provider_name))
-        })?;
-
-        if let Some(model) = &params.model {
-            model_config.model_name = model.clone();
-        } else if let Some(model) = recipe
-            .settings
-            .as_ref()
-            .and_then(|s| s.goose_model.as_ref())
-        {
-            model_config.model_name = model.clone();
-        } else if let Ok(model) = Config::global().get_param::<String>("GOOSE_SUBAGENT_MODEL") {
-            model_config.model_name = model;
-        }
-
-        if let Some(temp) = params.temperature {
-            model_config = model_config.with_temperature(Some(temp));
-        } else if let Some(temp) = recipe.settings.as_ref().and_then(|s| s.temperature) {
-            model_config = model_config.with_temperature(Some(temp));
-        }
-
-        providers::create(&provider_name, model_config, Vec::new()).await
+        let model_config = self.resolve_model_config(params, recipe, session, &provider_name)?;
+        let provider = providers::create(&provider_name, Vec::new()).await?;
+        Ok((provider, model_config))
     }
 
     fn resolve_max_turns(&self, session: &crate::session::Session) -> usize {
@@ -1366,22 +1734,21 @@ impl SummonClient {
                     result,
                     turns_taken,
                     duration,
+                    completed_at: Instant::now(),
                 },
             );
         }
+
+        let ttl = completed_task_ttl();
+        completed.retain(|_id, task| task.completed_at.elapsed() <= ttl);
     }
 
     fn get_task_description(params: &DelegateParams) -> String {
-        if let Some(source) = &params.source {
-            if let Some(instructions) = &params.instructions {
-                format!("{}: {}", source, truncate(instructions, 30))
-            } else {
-                source.clone()
-            }
-        } else if let Some(instructions) = &params.instructions {
-            truncate(instructions, 40)
-        } else {
-            "Unknown task".to_string()
+        match (&params.source, &params.instructions) {
+            (Some(source), Some(instructions)) => format!("{}: {}", source, instructions),
+            (Some(source), None) => source.clone(),
+            (None, Some(instructions)) => instructions.clone(),
+            (None, None) => "Unknown task".to_string(),
         }
     }
 
@@ -1416,7 +1783,7 @@ impl SummonClient {
             .await
             .map_err(|e| format!("Failed to build task config: {}", e))?;
 
-        let description = truncate(&Self::get_task_description(&params), 40);
+        let description = safe_truncate(&Self::get_task_description(&params), TASK_LABEL_BUDGET);
 
         // Subagents must use Auto until get_agent_messages forwards
         // ActionRequired messages to the parent. Until then, any mode
@@ -1428,13 +1795,14 @@ impl SummonClient {
             GooseMode::Auto,
             true, // disable session naming for subagents
             crate::agents::GoosePlatform::GooseCli,
-        );
+        )
+        .with_use_login_shell_path(self.context.use_login_shell_path);
 
         let subagent_session = self
             .context
             .session_manager
             .create_session(
-                working_dir,
+                task_config.parent_working_dir.clone(),
                 description.clone(),
                 SessionType::SubAgent,
                 GooseMode::Auto,
@@ -1576,6 +1944,15 @@ impl McpClientTrait for SummonClient {
         Some(&self.info)
     }
 
+    fn get_instructions(&self) -> Option<String> {
+        let instructions = build_subagent_instructions(self.context.session.as_deref());
+        if instructions.is_empty() {
+            None
+        } else {
+            Some(instructions)
+        }
+    }
+
     async fn subscribe(&self) -> mpsc::Receiver<ServerNotification> {
         let (tx, rx) = mpsc::channel(16);
         self.notification_subscribers.lock().await.push(tx);
@@ -1643,10 +2020,39 @@ impl McpClientTrait for SummonClient {
     }
 }
 
+/// Resolve a requested `working_dir` override against the parent session
+/// directory. Relative paths are joined to the parent dir; the result must
+/// canonicalize to an existing directory contained within the parent dir.
+fn resolve_working_dir(parent_dir: &Path, requested: &str) -> Result<PathBuf, anyhow::Error> {
+    let requested_path = PathBuf::from(requested);
+    let resolved = if requested_path.is_absolute() {
+        requested_path
+    } else {
+        parent_dir.join(&requested_path)
+    };
+    let canonical = resolved
+        .canonicalize()
+        .map_err(|e| anyhow::anyhow!("working_dir '{}' could not be resolved: {}", requested, e))?;
+    let parent_canonical = parent_dir
+        .canonicalize()
+        .unwrap_or_else(|_| parent_dir.to_path_buf());
+    if !canonical.starts_with(&parent_canonical) {
+        anyhow::bail!(
+            "working_dir '{}' is outside the parent session directory",
+            requested
+        );
+    }
+    if !canonical.is_dir() {
+        anyhow::bail!("working_dir '{}' is not a directory", requested);
+    }
+    Ok(canonical)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serial_test::serial;
+    use std::collections::{HashMap, HashSet};
     use std::fs;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -1656,6 +2062,7 @@ mod tests {
             extension_manager: None,
             session_manager: Arc::new(crate::session::SessionManager::instance()),
             session: None,
+            use_login_shell_path: false,
         }
     }
 
@@ -1666,9 +2073,130 @@ name: reviewer
 model: sonnet
 ---
 You review code."#;
-        let source = parse_agent_content(agent, PathBuf::new()).unwrap();
+        let source = parse_agent_content(agent, Path::new("")).unwrap();
         assert_eq!(source.name, "reviewer");
         assert!(source.description.contains("sonnet"));
+    }
+
+    #[test]
+    fn test_resolve_working_dir_relative_subdir() {
+        let temp_dir = TempDir::new().unwrap();
+        let parent = temp_dir.path().canonicalize().unwrap();
+        let subdir = parent.join("sub");
+        fs::create_dir(&subdir).unwrap();
+
+        let resolved = resolve_working_dir(&parent, "sub").unwrap();
+        assert_eq!(resolved, subdir.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_resolve_working_dir_rejects_traversal_outside_parent() {
+        let temp_dir = TempDir::new().unwrap();
+        let parent = temp_dir.path().join("parent");
+        let sibling = temp_dir.path().join("sibling");
+        fs::create_dir(&parent).unwrap();
+        fs::create_dir(&sibling).unwrap();
+
+        let err = resolve_working_dir(&parent, "../sibling").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("outside the parent session directory"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_working_dir_rejects_file_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let parent = temp_dir.path().canonicalize().unwrap();
+        let file = parent.join("a.txt");
+        fs::write(&file, "hello").unwrap();
+
+        let err = resolve_working_dir(&parent, "a.txt").unwrap_err();
+        assert!(
+            err.to_string().contains("is not a directory"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_working_dir_rejects_nonexistent_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let parent = temp_dir.path().canonicalize().unwrap();
+
+        let err = resolve_working_dir(&parent, "does-not-exist").unwrap_err();
+        assert!(
+            err.to_string().contains("could not be resolved"),
+            "unexpected error: {err}"
+        );
+    }
+    #[test]
+    fn test_agent_scan_skips_non_agent_markdown() {
+        let temp_dir = TempDir::new().unwrap();
+        let agents_dir = temp_dir.path().join("agents");
+        fs::create_dir_all(&agents_dir).unwrap();
+        fs::write(
+            agents_dir.join("README.md"),
+            "---\ntitle: Notes\n---\nThis is not an agent.",
+        )
+        .unwrap();
+        fs::write(
+            agents_dir.join("notes.md"),
+            "---\nauthor: someone\ntags: [docs]\n---\nJust documentation.",
+        )
+        .unwrap();
+        fs::write(
+            agents_dir.join("reviewer.md"),
+            "---\nname: reviewer\nmodel: sonnet\n---\nYou review code.",
+        )
+        .unwrap();
+        fs::write(agents_dir.join("plain.md"), "No frontmatter at all.").unwrap();
+        fs::write(
+            agents_dir.join("broken.md"),
+            "---\nname: [unterminated\n---\nBroken YAML.",
+        )
+        .unwrap();
+
+        let mut sources = Vec::new();
+        let mut seen = HashSet::new();
+        scan_agents_from_dir(&agents_dir, &mut sources, &mut seen);
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].name, "reviewer");
+    }
+
+    #[test]
+    fn test_recipe_scan_skips_non_recipe_project_config_files() {
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(
+            temp_dir.path().join("package.json"),
+            r#"{"scripts":{"test":"cargo test"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.path().join("tsconfig.json"),
+            r#"{"compilerOptions":{"strict":true}}"#,
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.path().join("valid.yaml"),
+            "title: Valid\ndescription: Real recipe\ninstructions: Run valid steps",
+        )
+        .unwrap();
+
+        let mut sources = Vec::new();
+        let mut seen = HashSet::new();
+        scan_recipes_from_dir(
+            temp_dir.path(),
+            SourceType::Recipe,
+            true,
+            &mut sources,
+            &mut seen,
+        );
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].name, "valid");
+        assert_eq!(sources[0].description, "Real recipe");
     }
 
     #[tokio::test]
@@ -1696,14 +2224,14 @@ You review code."#;
 
         let recipe = sources
             .iter()
-            .find(|s| s.name == "deploy" && s.kind == SourceKind::Recipe)
+            .find(|s| s.name == "deploy" && s.source_type == SourceType::Recipe)
             .unwrap();
         assert_eq!(recipe.description, "Deploy to production");
         assert_eq!(recipe.content, "Run deploy steps");
 
         let agent = sources
             .iter()
-            .find(|s| s.name == "reviewer" && s.kind == SourceKind::Agent)
+            .find(|s| s.name == "reviewer" && s.source_type == SourceType::Agent)
             .unwrap();
         assert_eq!(agent.description, "Code reviewer");
         assert!(agent.content.contains("You review code"));
@@ -1870,10 +2398,45 @@ You review code."#;
             SummonClient::get_task_description(&make_params(Some("r"), Some("task"))),
             "r: task"
         );
+        assert_eq!(
+            SummonClient::get_task_description(&make_params(None, None)),
+            "Unknown task"
+        );
+    }
 
-        let long = "x".repeat(100);
-        let desc = SummonClient::get_task_description(&make_params(None, Some(&long)));
-        assert!(desc.len() <= 43 && desc.ends_with("..."));
+    #[tokio::test]
+    async fn test_context_injected_into_adhoc_recipe() {
+        let temp_dir = TempDir::new().unwrap();
+        let client = SummonClient::new(create_test_context()).unwrap();
+
+        let params = DelegateParams {
+            instructions: Some("do the task".to_string()),
+            context: Some("background info".to_string()),
+            ..Default::default()
+        };
+
+        let recipe = client
+            .build_delegate_recipe(&params, "test", temp_dir.path())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            recipe.instructions.as_deref(),
+            Some("# Reference Context\n\nbackground info")
+        );
+        assert_eq!(recipe.prompt.as_deref(), Some("do the task"));
+    }
+
+    #[test]
+    fn test_build_instructions_with_context_wraps_existing_instructions() {
+        assert_eq!(
+            build_instructions_with_context("background info", "Run deploy steps"),
+            "# Reference Context\n\nbackground info\n\n# Task Instructions\n\nRun deploy steps"
+        );
+        assert_eq!(
+            build_instructions_with_context("background info", ""),
+            "# Reference Context\n\nbackground info"
+        );
     }
 
     #[test]
@@ -1980,6 +2543,103 @@ You review code."#;
         );
     }
 
+    fn empty_recipe() -> crate::recipe::Recipe {
+        crate::recipe::Recipe {
+            version: "1.0.0".to_string(),
+            title: String::new(),
+            description: String::new(),
+            instructions: None,
+            prompt: None,
+            extensions: None,
+            settings: None,
+            activities: None,
+            author: None,
+            parameters: None,
+            response: None,
+            sub_recipes: None,
+            retry: None,
+        }
+    }
+
+    const PARENT_MODEL: &str = "claude-3-5-sonnet-20241022";
+    const OVERRIDE_MODEL: &str = "claude-opus-4-6";
+    const PROVIDER: &str = "anthropic";
+
+    fn session_with(parent: goose_providers::model::ModelConfig) -> crate::session::Session {
+        crate::session::Session {
+            provider_name: Some(PROVIDER.to_string()),
+            model_config: Some(parent),
+            ..Default::default()
+        }
+    }
+
+    fn resolve_with_override(
+        model: Option<&str>,
+        parent: goose_providers::model::ModelConfig,
+    ) -> goose_providers::model::ModelConfig {
+        let client = SummonClient::new(create_test_context()).unwrap();
+        let params = DelegateParams {
+            model: model.map(String::from),
+            ..Default::default()
+        };
+        client
+            .resolve_model_config(&params, &empty_recipe(), &session_with(parent), PROVIDER)
+            .expect("resolve_model_config")
+    }
+
+    fn parent_config() -> goose_providers::model::ModelConfig {
+        goose_providers::model::ModelConfig::new(PARENT_MODEL).with_canonical_limits(PROVIDER)
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_resolve_model_config_applies_canonical_limits_to_overridden_model() {
+        let _env = env_lock::lock_env([
+            ("GOOSE_CONTEXT_LIMIT", None::<&str>),
+            ("GOOSE_MAX_TOKENS", None::<&str>),
+            ("GOOSE_SUBAGENT_MODEL", None::<&str>),
+        ]);
+
+        let parent = parent_config();
+        let overridden = goose_providers::model::ModelConfig::new(OVERRIDE_MODEL)
+            .with_canonical_limits(PROVIDER);
+        assert_ne!(parent.context_limit, overridden.context_limit);
+        assert_ne!(parent.reasoning, overridden.reasoning);
+
+        let resolved = resolve_with_override(Some(OVERRIDE_MODEL), parent);
+
+        assert_eq!(resolved.model_name, OVERRIDE_MODEL);
+        assert_eq!(resolved.context_limit, overridden.context_limit);
+        assert_eq!(resolved.max_tokens, overridden.max_tokens);
+        assert_eq!(resolved.reasoning, overridden.reasoning);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_resolve_model_config_preserves_parent_request_params_on_override() {
+        let _env = env_lock::lock_env([
+            ("GOOSE_CONTEXT_LIMIT", None::<&str>),
+            ("GOOSE_MAX_TOKENS", None::<&str>),
+            ("GOOSE_SUBAGENT_MODEL", None::<&str>),
+        ]);
+
+        let mut parent = parent_config();
+        parent.request_params = Some(HashMap::from([(
+            "anthropic_beta".to_string(),
+            serde_json::json!("custom-beta-header"),
+        )]));
+
+        let resolved = resolve_with_override(Some(OVERRIDE_MODEL), parent);
+
+        assert_eq!(
+            resolved
+                .request_params
+                .as_ref()
+                .and_then(|p| p.get("anthropic_beta")),
+            Some(&serde_json::json!("custom-beta-header")),
+        );
+    }
+
     fn extract_text(content: &Content) -> &str {
         use rmcp::model::RawContent;
         match &content.raw {
@@ -2004,7 +2664,9 @@ You review code."#;
         let client = SummonClient::new(create_test_context()).unwrap();
         let temp_dir = TempDir::new().unwrap();
 
-        let result = client.handle_load_task_result("20260204_999", false).await;
+        let result = client
+            .handle_load_task_result("20260204_999", false, false)
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not found"));
 
@@ -2046,10 +2708,10 @@ You review code."#;
         let mut subscriber = client.subscribe().await;
 
         let result = client
-            .handle_load_task_result("20260204_1", false)
+            .handle_load_task_result("20260204_1", false, false)
             .await
             .expect("load should wait and return result");
-        let text = extract_text(&result[0]);
+        let text = extract_text(&result.content[0]);
         assert!(text.contains("Completed"));
         assert!(text.contains("done"));
 
@@ -2076,6 +2738,7 @@ You review code."#;
                     result: Ok("Task completed successfully with output".to_string()),
                     turns_taken: 5,
                     duration: Duration::from_secs(60),
+                    completed_at: Instant::now(),
                 },
             );
             completed.insert(
@@ -2086,6 +2749,7 @@ You review code."#;
                     result: Err("Something went wrong".to_string()),
                     turns_taken: 3,
                     duration: Duration::from_secs(30),
+                    completed_at: Instant::now(),
                 },
             );
         }
@@ -2106,16 +2770,18 @@ You review code."#;
         assert!(discovery_text.contains("20260204_3"));
 
         let result = client
-            .handle_load_task_result("20260204_2", false)
+            .handle_load_task_result("20260204_2", false, false)
             .await
             .unwrap();
-        let text = extract_text(&result[0]);
+        let text = extract_text(&result.content[0]);
         assert!(text.contains("20260204_2"));
         assert!(text.contains("Successful task"));
         assert!(text.contains("✓ Completed"));
         assert!(text.contains("1m"));
         assert!(text.contains("5 turns"));
         assert!(text.contains("Task completed successfully with output"));
+        assert_eq!(result.status, "completed");
+        assert_eq!(result.turns, Some(5));
 
         assert!(!client
             .completed_tasks
@@ -2124,14 +2790,17 @@ You review code."#;
             .contains_key("20260204_2"));
 
         let result = client
-            .handle_load_task_result("20260204_3", false)
+            .handle_load_task_result("20260204_3", false, false)
             .await
             .unwrap();
-        let text = extract_text(&result[0]);
+        let text = extract_text(&result.content[0]);
         assert!(text.contains("✗ Failed"));
         assert!(text.contains("Error: Something went wrong"));
+        assert_eq!(result.status, "failed");
 
-        let result = client.handle_load_task_result("20260204_3", false).await;
+        let result = client
+            .handle_load_task_result("20260204_3", false, false)
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not found"));
 
@@ -2165,18 +2834,114 @@ You review code."#;
         }
 
         let result = client
-            .handle_load_task_result("20260204_1", true)
+            .handle_load_task_result("20260204_1", true, false)
             .await
             .unwrap();
-        let text = extract_text(&result[0]);
+        let text = extract_text(&result.content[0]);
         assert!(text.contains("Cancelled"));
         assert!(text.contains("20260204_1"));
         assert!(text.contains("Cancellable task"));
+        assert_eq!(result.status, "cancelled");
+        assert_eq!(result.turns, Some(3));
         assert!(token.is_cancelled());
         assert!(!client
             .background_tasks
             .lock()
             .await
             .contains_key("20260204_1"));
+    }
+
+    #[tokio::test]
+    async fn test_peek_running_task() {
+        let client = SummonClient::new(create_test_context()).unwrap();
+
+        {
+            let mut running = client.background_tasks.lock().await;
+            running.insert(
+                "20260204_1".to_string(),
+                BackgroundTask {
+                    id: "20260204_1".to_string(),
+                    description: "Long running analysis".to_string(),
+                    started_at: Instant::now(),
+                    turns: Arc::new(AtomicU32::new(7)),
+                    last_activity: Arc::new(AtomicU64::new(current_epoch_millis())),
+                    handle: tokio::spawn(async {
+                        tokio::time::sleep(Duration::from_secs(1000)).await;
+                        Ok("eventual result".to_string())
+                    }),
+                    cancellation_token: CancellationToken::new(),
+                    notification_buffer: Arc::new(Mutex::new(Vec::new())),
+                },
+            );
+        }
+
+        // Peek should return status without removing the task
+        let result = client
+            .handle_load_task_result("20260204_1", false, true)
+            .await
+            .unwrap();
+        let text = extract_text(&result.content[0]);
+        assert!(text.contains("Running"));
+        assert!(text.contains("Long running analysis"));
+        assert!(text.contains("7")); // turns taken
+
+        // Task should still be in background_tasks (not consumed)
+        assert!(client
+            .background_tasks
+            .lock()
+            .await
+            .contains_key("20260204_1"));
+    }
+
+    #[tokio::test]
+    async fn test_peek_nonexistent_task() {
+        let client = SummonClient::new(create_test_context()).unwrap();
+
+        let result = client
+            .handle_load_task_result("20260204_999", false, true)
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_peek_completed_task_returns_result() {
+        let client = SummonClient::new(create_test_context()).unwrap();
+
+        {
+            let mut completed = client.completed_tasks.lock().await;
+            completed.insert(
+                "20260204_1".to_string(),
+                CompletedTask {
+                    id: "20260204_1".to_string(),
+                    description: "Finished task".to_string(),
+                    result: Ok("final output".to_string()),
+                    turns_taken: 4,
+                    duration: Duration::from_secs(30),
+                    completed_at: Instant::now(),
+                },
+            );
+        }
+
+        // Peek on a completed task should return the full result (same as non-peek)
+        let result = client
+            .handle_load_task_result("20260204_1", false, true)
+            .await
+            .unwrap();
+        let text = extract_text(&result.content[0]);
+        assert!(text.contains("Completed"));
+        assert!(text.contains("final output"));
+
+        // Peek must be non-destructive: the result is still retrievable afterwards.
+        assert!(client
+            .completed_tasks
+            .lock()
+            .await
+            .contains_key("20260204_1"));
+        let result = client
+            .handle_load_task_result("20260204_1", false, false)
+            .await
+            .unwrap();
+        assert!(extract_text(&result.content[0]).contains("final output"));
     }
 }

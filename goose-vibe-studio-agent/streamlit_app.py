@@ -25,10 +25,6 @@ if "goose_url" not in st.session_state:
     st.session_state.goose_url = _DEFAULT_URL
 if "secret_key" not in st.session_state:
     st.session_state.secret_key = _DEFAULT_KEY
-if "preview_url" not in st.session_state:
-    st.session_state.preview_url = None
-if "preview_loading" not in st.session_state:
-    st.session_state.preview_loading = False
 
 
 def get_headers():
@@ -601,24 +597,12 @@ def start_agent_session():
     with httpx.Client(timeout=30.0, verify=False) as client:
         resp = client.post(
             f"{st.session_state.goose_url}/agent/start",
-            json={"working_dir": working_dir, "recipe": recipe},
+            json={"working_dir": os.getcwd()},
             headers=get_headers(),
         )
         resp.raise_for_status()
         data = resp.json()
         return data.get("id")
-
-
-def call_preview(session_id: str) -> str:
-    """Call POST /sessions/{id}/preview and return the deploy URL."""
-    with httpx.Client(timeout=300.0, verify=False) as client:
-        resp = client.post(
-            f"{st.session_state.goose_url}/sessions/{session_id}/preview",
-            headers=get_headers(),
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("deployUrl") or data.get("deploy_url") or data.get("url", "")
 
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
@@ -756,7 +740,6 @@ with st.sidebar:
                 },
                 headers=get_headers(),
                 verify=False,
-                timeout=30.0,
             )
             resp.raise_for_status()
             st.success(f"Provider set to {provider}/{model}")
@@ -773,80 +756,15 @@ with st.sidebar:
             st.session_state.session_id = start_agent_session()
             st.session_state.agent_started = True
             st.session_state.messages = []
-            st.session_state.preview_url = None
             st.rerun()
         except Exception as e:
             st.error(f"Failed to create session: {e}")
 
-    st.divider()
-
-    # ── Preview button ────────────────────────────────────────────────────
-    st.header("Preview")
-
-    if not st.session_state.session_id:
-        st.caption("Start a session to enable preview.")
-    else:
-        if st.button("🚀 Preview App", use_container_width=True, type="primary"):
-            st.session_state.preview_loading = True
-            st.session_state.preview_url = None
-            with st.spinner("Building & deploying app…"):
-                try:
-                    url = call_preview(st.session_state.session_id)
-                    if url:
-                        st.session_state.preview_url = url
-                        st.success("App deployed!")
-                    else:
-                        st.error("No URL returned from builder.")
-                except httpx.HTTPStatusError as e:
-                    st.error(f"Deploy failed ({e.response.status_code}): {e.response.text}")
-                except Exception as e:
-                    st.error(f"Preview error: {e}")
-                finally:
-                    st.session_state.preview_loading = False
-
-        if st.session_state.preview_url:
-            st.success("✅ App is live")
-            st.code(st.session_state.preview_url, language=None)
-            if st.button("🔄 Refresh Preview"):
-                st.session_state.preview_url = None
-                st.rerun()
-
-
-# ── Layout: chat on left, preview on right when URL is set ──────────────────
-if st.session_state.preview_url:
-    chat_col, preview_col = st.columns([1, 1], gap="medium")
-else:
-    chat_col = st.container()
-    preview_col = None
-
-
-# ── Preview panel ─────────────────────────────────────────────────────────────
-if preview_col and st.session_state.preview_url:
-    with preview_col:
-        st.subheader("🖥️ App Preview")
-        close_col, link_col = st.columns([1, 3])
-        with close_col:
-            if st.button("✕ Close"):
-                st.session_state.preview_url = None
-                st.rerun()
-        with link_col:
-            st.markdown(
-                f'<a href="{st.session_state.preview_url}" target="_blank">'
-                f'🔗 Open in new tab</a>',
-                unsafe_allow_html=True,
-            )
-        st.components.v1.iframe(
-            src=st.session_state.preview_url,
-            height=700,
-            scrolling=True,
-        )
-
 
 # ── Render existing messages ─────────────────────────────────────────────────
-with chat_col:
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
 
 
 # ── Helper: stream goose response ───────────────────────────────────────────
@@ -921,23 +839,22 @@ def stream_goose_response(user_text: str):
 
 
 # ── Chat input ───────────────────────────────────────────────────────────────
-with chat_col:
-    if prompt := st.chat_input("Ask Goose anything..."):
-        # Show user message
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+if prompt := st.chat_input("Ask Goose anything..."):
+    # Show user message
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
 
-        # Stream assistant response
-        with st.chat_message("assistant"):
-            try:
-                full_response = st.write_stream(stream_goose_response(prompt))
-            except httpx.ConnectError:
-                full_response = "**Error:** Cannot connect to goose server. Make sure `goosed agent` is running on " + st.session_state.goose_url
-                st.error(full_response)
-            except Exception as e:
-                full_response = f"**Error:** {e}"
-                st.error(full_response)
+    # Stream assistant response
+    with st.chat_message("assistant"):
+        try:
+            full_response = st.write_stream(stream_goose_response(prompt))
+        except httpx.ConnectError:
+            full_response = "**Error:** Cannot connect to goose server. Make sure `goosed agent` is running on " + st.session_state.goose_url
+            st.error(full_response)
+        except Exception as e:
+            full_response = f"**Error:** {e}"
+            st.error(full_response)
 
-        st.session_state.messages.append({"role": "assistant", "content": full_response})
+    st.session_state.messages.append({"role": "assistant", "content": full_response})
 

@@ -6,6 +6,7 @@ tokenizer_files/
 .DS_Store
 .idea
 .vscode
+.zed/
 *.log
 tmp/
 
@@ -35,7 +36,7 @@ ui/desktop/src/bin/goose_llm.dll
 .hermit/
 
 # Claude
-.claude
+.claude/settings.local.json
 
 debug_*.txt
 
@@ -63,6 +64,12 @@ do_not_version/
 /.env
 
 /working_dir
+
+# Local build scripts and generated snapshot artifacts
+/build.bat
+/build.ps1
+/build_check.ps1
+/crates/goose/src/agents/snapshots/*.snap.new
 
 # Error log artifacts from mcp replay tests
 crates/goose/tests/mcp_replays/*errors.txt

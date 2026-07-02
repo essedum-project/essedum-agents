@@ -13,6 +13,7 @@ use crate::session::task_execution_display::{
     format_task_execution_notification, TASK_EXECUTION_NOTIFICATION_TYPE,
 };
 use goose::conversation::Conversation;
+use std::env;
 use std::io::Write;
 use std::str::FromStr;
 use tokio::signal::ctrl_c;
@@ -27,6 +28,7 @@ use goose::permission::permission_confirmation::PrincipalType;
 use goose::permission::Permission;
 use goose::permission::PermissionConfirmation;
 use goose::providers::base::Provider;
+use goose::providers::base::ProviderUsage;
 use goose::utils::safe_truncate;
 
 use anyhow::{Context, Result};
@@ -37,8 +39,8 @@ use goose::agents::{Agent, SessionConfig, COMPACT_TRIGGERS};
 use goose::config::extensions::name_to_key;
 use goose::config::{Config, GooseMode};
 use input::InputResult;
-use rmcp::model::PromptMessage;
 use rmcp::model::ServerNotification;
+use rmcp::model::{ElicitationAction, PromptMessage};
 use rmcp::model::{ErrorCode, ErrorData};
 use strum::VariantNames;
 
@@ -56,6 +58,8 @@ use tokio;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
+const GOOSE_PLANNER_CONTEXT_LIMIT: &str = "GOOSE_PLANNER_CONTEXT_LIMIT";
+
 #[derive(Serialize, Deserialize, Debug)]
 struct JsonOutput {
     messages: Vec<Message>,
@@ -65,6 +69,10 @@ struct JsonOutput {
 #[derive(Serialize, Deserialize, Debug)]
 struct JsonMetadata {
     total_tokens: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_tokens: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_tokens: Option<i32>,
     status: String,
 }
 
@@ -84,6 +92,10 @@ enum StreamEvent {
     },
     Complete {
         total_tokens: Option<i32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        input_tokens: Option<i32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output_tokens: Option<i32>,
     },
 }
 
@@ -164,6 +176,7 @@ pub struct CliSession {
     edit_mode: Option<EditMode>,
     retry_config: Option<RetryConfig>,
     output_format: String,
+    stats: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,22 +219,23 @@ pub async fn classify_planner_response(
     session_id: &str,
     message_text: String,
     provider: Arc<dyn Provider>,
+    model_config: goose_providers::model::ModelConfig,
 ) -> Result<PlannerResponseType> {
     let prompt = format!(
         "The text below is the output from an AI model which can either provide a plan or list of clarifying questions. Based on the text below, decide if the output is a \"plan\" or \"clarifying questions\".\n---\n{message_text}"
     );
 
     let message = Message::user().with_text(&prompt);
-    let model_config = provider.get_model_config();
-    let (result, _usage) = provider
-        .complete(
+    let (result, _usage) = goose::session_context::with_session_id(
+        Some(session_id.to_string()),
+        provider.complete(
             &model_config,
-            session_id,
             "Reply only with the classification label: \"plan\" or \"clarifying questions\"",
             &[message],
             &[],
-        )
-        .await?;
+        ),
+    )
+    .await?;
 
     let predicted = result.as_concat_text();
     if predicted.to_lowercase().contains("plan") {
@@ -229,36 +243,6 @@ pub async fn classify_planner_response(
     } else {
         Ok(PlannerResponseType::ClarifyingQuestions)
     }
-}
-
-pub fn split_quoted(input: &str) -> Result<Vec<String>> {
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let mut in_double_quote = false;
-    let mut in_single_quote = false;
-
-    for c in input.chars() {
-        match c {
-            '"' if !in_single_quote => in_double_quote = !in_double_quote,
-            '\'' if !in_double_quote => in_single_quote = !in_single_quote,
-            c if c.is_whitespace() && !in_double_quote && !in_single_quote => {
-                if !current.is_empty() {
-                    parts.push(std::mem::take(&mut current));
-                }
-            }
-            _ => current.push(c),
-        }
-    }
-
-    if in_double_quote || in_single_quote {
-        return Err(anyhow::anyhow!("Unmatched quote in command"));
-    }
-
-    if !current.is_empty() {
-        parts.push(current);
-    }
-
-    Ok(parts)
 }
 
 impl CliSession {
@@ -272,6 +256,7 @@ impl CliSession {
         edit_mode: Option<EditMode>,
         retry_config: Option<RetryConfig>,
         output_format: String,
+        stats: bool,
     ) -> Self {
         let messages = agent
             .config
@@ -293,6 +278,7 @@ impl CliSession {
             edit_mode,
             retry_config,
             output_format,
+            stats,
         }
     }
 
@@ -303,7 +289,7 @@ impl CliSession {
     /// Parse a stdio extension command string into an ExtensionConfig
     /// Format: "ENV1=val1 ENV2=val2 command args..."
     pub fn parse_stdio_extension(extension_command: &str) -> Result<ExtensionConfig> {
-        let mut parts = split_quoted(extension_command)?;
+        let mut parts = goose::utils::split_command_args(extension_command)?;
         let mut envs = HashMap::new();
 
         while let Some(part) = parts.first() {
@@ -334,6 +320,7 @@ impl CliSession {
             env_keys: Vec::new(),
             description: goose::config::DEFAULT_EXTENSION_DESCRIPTION.to_string(),
             timeout: Some(goose::config::DEFAULT_EXTENSION_TIMEOUT),
+            cwd: None,
             bundled: None,
             available_tools: Vec::new(),
         })
@@ -369,6 +356,7 @@ impl CliSession {
             headers: HashMap::new(),
             description: goose::config::DEFAULT_EXTENSION_DESCRIPTION.to_string(),
             timeout: Some(timeout),
+            socket: None,
             bundled: None,
             available_tools: Vec::new(),
         }
@@ -488,18 +476,42 @@ impl CliSession {
         &mut self,
         message: Message,
         cancel_token: CancellationToken,
+        interactive: bool,
     ) -> Result<()> {
         let cancel_token = cancel_token.clone();
         self.push_message(message);
-        self.process_agent_response(false, cancel_token).await?;
+        self.process_agent_response(interactive, cancel_token)
+            .await?;
         Ok(())
     }
 
     /// Start an interactive session, optionally with an initial message
     pub async fn interactive(&mut self, prompt: Option<String>) -> Result<()> {
+        self.agent
+            .emit_hook(goose::hooks::HookEvent::SessionStart, &self.session_id)
+            .await;
+
+        let result = self.run_interactive(prompt).await;
+
+        self.agent
+            .emit_hook(goose::hooks::HookEvent::SessionEnd, &self.session_id)
+            .await;
+
+        if result.is_ok() {
+            println!(
+                "\n  {} {}",
+                console::style("●").red(),
+                console::style(format!("session closed · {}", &self.session_id)).dim()
+            );
+        }
+
+        result
+    }
+
+    async fn run_interactive(&mut self, prompt: Option<String>) -> Result<()> {
         if let Some(prompt) = prompt {
             let msg = Message::user().with_text(&prompt);
-            self.process_message(msg, CancellationToken::default())
+            self.process_message(msg, CancellationToken::default(), true)
                 .await?;
         }
 
@@ -529,15 +541,9 @@ impl CliSession {
             if matches!(input, InputResult::Exit) {
                 break;
             }
-            self.handle_input(input, &history_manager, &mut editor)
+            self.handle_input(input, &history_manager, &mut editor, &conversation_strings)
                 .await?;
         }
-
-        println!(
-            "\n  {} {}",
-            console::style("●").red(),
-            console::style(format!("session closed · {}", &self.session_id)).dim()
-        );
 
         Ok(())
     }
@@ -566,6 +572,7 @@ impl CliSession {
         input: InputResult,
         history: &HistoryManager,
         editor: &mut rustyline::Editor<GooseCompleter, rustyline::history::DefaultHistory>,
+        conversation_messages: &[String],
     ) -> Result<()> {
         match input {
             InputResult::Message(content) => {
@@ -610,6 +617,10 @@ impl CliSession {
                 history.save(editor);
                 self.handle_goose_mode(&mode).await?;
             }
+            InputResult::Model(model) => {
+                history.save(editor);
+                self.handle_model(model.as_deref()).await?;
+            }
             InputResult::Plan(options) => {
                 self.handle_plan_mode(options).await?;
             }
@@ -632,6 +643,45 @@ impl CliSession {
             InputResult::Compact => {
                 history.save(editor);
                 self.handle_compact().await?;
+            }
+            InputResult::Edit(prefill) => {
+                history.save(editor);
+                match crate::session::editor::resolve_editor_command() {
+                    Some(editor_cmd) => {
+                        let messages: Vec<&str> =
+                            conversation_messages.iter().map(|s| s.as_str()).collect();
+                        match crate::session::editor::get_editor_input(
+                            &editor_cmd,
+                            &messages,
+                            prefill.as_deref(),
+                        ) {
+                            Ok((message, true)) => {
+                                editor.add_history_entry(message.as_str())?;
+                                history.save(editor);
+                                self.handle_message_input(&message, history, editor).await?;
+                            }
+                            Ok((_, false)) => {}
+                            Err(e) => {
+                                output::render_error(&format!("Failed to open editor: {}", e));
+                            }
+                        }
+                    }
+                    None => {
+                        output::render_error(
+                            "No editor found. Set one with:\n  \
+                                 goose configure set goose_prompt_editor \"vim\"\n  \
+                                 or set $VISUAL or $EDITOR in your shell.",
+                        );
+                    }
+                }
+            }
+            InputResult::LoadSkills(names) => {
+                history.save(editor);
+                self.handle_load_skills(&names).await?;
+            }
+            InputResult::ListSkills => {
+                history.save(editor);
+                self.handle_list_skills().await?;
             }
         }
         Ok(())
@@ -675,8 +725,8 @@ impl CliSession {
             RunMode::Plan => {
                 let mut plan_messages = self.messages.clone();
                 plan_messages.push(Message::user().with_text(content));
-                let reasoner = get_reasoner().await?;
-                self.plan_with_reasoner_model(plan_messages, reasoner)
+                let (reasoner, reasoner_model_config) = get_reasoner().await?;
+                self.plan_with_reasoner_model(plan_messages, reasoner, reasoner_model_config)
                     .await?;
             }
         }
@@ -760,6 +810,78 @@ impl CliSession {
         Ok(())
     }
 
+    async fn handle_model(&self, model: Option<&str>) -> Result<()> {
+        let provider = self.agent.provider().await?;
+        let current_provider_name = provider.get_name().to_string();
+        let current_model_config = self
+            .agent
+            .model_config_for_session(&self.session_id)
+            .await?;
+        let current_model_name = current_model_config.model_name.clone();
+
+        if model.is_none() {
+            output::goose_mode_message(&format!(
+                "Current session model: '{}' (provider '{}')",
+                current_model_name, current_provider_name
+            ));
+            return Ok(());
+        }
+
+        let model_name = model.unwrap_or_default().trim();
+        if model_name.is_empty() {
+            output::render_error("Model name cannot be empty");
+            return Ok(());
+        }
+
+        if current_provider_name.ends_with("-acp") {
+            output::render_error(
+                "Session model switching is not supported for ACP providers in the CLI.",
+            );
+            return Ok(());
+        }
+
+        if provider.manages_own_context() {
+            output::render_error(&format!(
+                "Session model switching is not supported for provider '{}' because it manages its own conversation context.",
+                current_provider_name
+            ));
+            return Ok(());
+        }
+
+        let new_model_config =
+            build_switched_model_config(&current_provider_name, model_name, &current_model_config)?;
+
+        let configured_effort = Config::global().get_goose_thinking_effort();
+        let new_effort = new_model_config.thinking_effort().or(configured_effort);
+        let current_effort = current_model_config.thinking_effort().or(configured_effort);
+        if new_model_config.model_name == current_model_config.model_name
+            && new_effort == current_effort
+        {
+            output::goose_mode_message(&format!(
+                "Session already using model '{}' for provider '{}'",
+                current_model_name, current_provider_name
+            ));
+            return Ok(());
+        }
+
+        let extensions = self.agent.get_extension_configs().await;
+        let new_provider = goose::providers::create(&current_provider_name, extensions)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create provider: {e}"))?;
+
+        self.agent
+            .update_provider(new_provider, new_model_config, &self.session_id)
+            .await?;
+
+        let mode = self.agent.goose_mode().await;
+        self.agent.update_goose_mode(mode, &self.session_id).await?;
+        output::goose_mode_message(&format!(
+            "Session model switched from '{}' to '{}' for provider '{}'",
+            current_model_name, model_name, current_provider_name
+        ));
+        Ok(())
+    }
+
     async fn handle_plan_mode(&mut self, options: input::PlanCommandOptions) -> Result<()> {
         self.run_mode = RunMode::Plan;
         output::render_enter_plan_mode();
@@ -771,8 +893,9 @@ impl CliSession {
         let mut plan_messages = self.messages.clone();
         plan_messages.push(Message::user().with_text(&options.message_text));
 
-        let reasoner = get_reasoner().await?;
-        self.plan_with_reasoner_model(plan_messages, reasoner).await
+        let (reasoner, reasoner_model_config) = get_reasoner().await?;
+        self.plan_with_reasoner_model(plan_messages, reasoner, reasoner_model_config)
+            .await
     }
 
     async fn handle_clear(&mut self) -> Result<()> {
@@ -792,9 +915,11 @@ impl CliSession {
             .config
             .session_manager
             .update(&self.session_id)
-            .total_tokens(Some(0))
-            .input_tokens(Some(0))
-            .output_tokens(Some(0))
+            .usage(goose_providers::conversation::token_usage::Usage::new(
+                Some(0),
+                Some(0),
+                Some(0),
+            ))
             .apply()
             .await
         {
@@ -842,6 +967,67 @@ impl CliSession {
         }
     }
 
+    async fn handle_load_skills(&mut self, names: &[String]) -> Result<()> {
+        // NOTE: We don't validate the skill names here because the load_skill tool will
+        // handle that and provide feedback to the user if any skill names are invalid.
+        let message = format!(
+            "Use the load_skill tool to load the following skills: {}.",
+            names
+                .iter()
+                .map(|n| format!("\"{}\"", n))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        self.push_message(Message::user().with_text(&message));
+        output::show_thinking();
+        let result = self
+            .process_agent_response(true, CancellationToken::default())
+            .await;
+        output::hide_thinking();
+        result?;
+
+        Ok(())
+    }
+
+    async fn handle_list_skills(&mut self) -> Result<()> {
+        use comfy_table::{presets, Cell, ContentArrangement, Table};
+        use goose::custom_requests::SourceType;
+        use goose::skills::list_installed_skills;
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let skills = list_installed_skills(Some(&cwd));
+
+        if skills.is_empty() {
+            println!("{}", console::style("No skills available.").yellow());
+            return Ok(());
+        }
+
+        let mut table = Table::new();
+        table.set_content_arrangement(ContentArrangement::Dynamic);
+        table.load_preset(presets::ASCII_FULL);
+        table.set_header(vec!["Skill", "Location", "Description"]);
+
+        let mut sorted_skills = skills;
+        sorted_skills.sort_by(|a, b| a.name.cmp(&b.name));
+
+        for skill in &sorted_skills {
+            let location = if skill.source_type == SourceType::BuiltinSkill {
+                "built-in"
+            } else if skill.global {
+                "global"
+            } else {
+                "project"
+            };
+            table.add_row(vec![
+                Cell::new(&skill.name),
+                Cell::new(location),
+                Cell::new(&skill.description),
+            ]);
+        }
+
+        println!("{table}");
+        Ok(())
+    }
+
     async fn handle_compact(&mut self) -> Result<()> {
         let prompt = "Are you sure you want to compact this conversation? This will condense the message history.";
         let should_summarize = match cliclack::confirm(prompt).initial_value(true).interact() {
@@ -871,25 +1057,24 @@ impl CliSession {
         &mut self,
         plan_messages: Conversation,
         reasoner: Arc<dyn Provider>,
+        model_config: goose_providers::model::ModelConfig,
     ) -> Result<(), anyhow::Error> {
         let plan_prompt = self.agent.get_plan_prompt(&self.session_id).await?;
         output::show_thinking();
-        let model_config = reasoner.get_model_config();
-        let (plan_response, _usage) = reasoner
-            .complete(
-                &model_config,
-                &self.session_id,
-                &plan_prompt,
-                plan_messages.messages(),
-                &[],
-            )
-            .await?;
+        let (plan_response, _usage) = goose::session_context::with_session_id(
+            Some(self.session_id.clone()),
+            reasoner.complete(&model_config, &plan_prompt, plan_messages.messages(), &[]),
+        )
+        .await?;
         output::render_message(&plan_response, self.debug);
         output::hide_thinking();
         let planner_response_type = classify_planner_response(
             &self.session_id,
             plan_response.as_concat_text(),
             self.agent.provider().await?,
+            self.agent
+                .model_config_for_session(&self.session_id)
+                .await?,
         )
         .await?;
 
@@ -954,9 +1139,17 @@ impl CliSession {
 
     /// Process a single message and exit
     pub async fn headless(&mut self, prompt: String) -> Result<()> {
+        self.agent
+            .emit_hook(goose::hooks::HookEvent::SessionStart, &self.session_id)
+            .await;
         let message = Message::user().with_text(&prompt);
-        self.process_message(message, CancellationToken::default())
-            .await?;
+        let result = self
+            .process_message(message, CancellationToken::default(), false)
+            .await;
+        self.agent
+            .emit_hook(goose::hooks::HookEvent::SessionEnd, &self.session_id)
+            .await;
+        result?;
         Ok(())
     }
 
@@ -1001,6 +1194,9 @@ impl CliSession {
         let mut markdown_buffer = streaming_buffer::MarkdownBuffer::new();
         let mut prompted_credits_urls: HashSet<String> = HashSet::new();
         let mut thinking_header_shown = false;
+        let run_started = Instant::now();
+        let mut first_token_at: Option<Instant> = None;
+        let mut last_usage: Option<ProviderUsage> = None;
 
         use futures::StreamExt;
         loop {
@@ -1008,8 +1204,32 @@ impl CliSession {
                 result = stream.next() => {
                     match result {
                         Some(Ok(AgentEvent::Message(message))) => {
+                            if first_token_at.is_none() && message_has_text(&message) {
+                                first_token_at = Some(Instant::now());
+                            }
                             if let Some((id, security_prompt)) = find_tool_confirmation(&message) {
-                                let permission = prompt_tool_confirmation(&security_prompt)?;
+                                let permission = if interactive {
+                                    prompt_tool_confirmation(&security_prompt)?
+                                } else {
+                                    // Non-interactive/headless mode: refuse to run in
+                                    // Approve/SmartApprove modes since auto-allowing would
+                                    // bypass the safety contract those modes are meant to enforce.
+                                    let config = Config::global();
+                                    let goose_mode = config.get_goose_mode().unwrap_or(GooseMode::Auto);
+                                    if goose_mode == GooseMode::Approve || goose_mode == GooseMode::SmartApprove {
+                                        cancel_token_clone.cancel();
+                                        drop(stream);
+                                        return Err(anyhow::anyhow!(
+                                            "Tool approval required in non-interactive mode with GooseMode::{goose_mode}. \
+                                             This is an invalid configuration — Approve/SmartApprove modes require an \
+                                             interactive terminal. Use GooseMode::Auto for headless sessions."
+                                        ));
+                                    }
+                                    tracing::warn!(
+                                        "Tool confirmation required in non-interactive mode, auto-allowing"
+                                    );
+                                    Permission::AllowOnce
+                                };
 
                                 if permission == Permission::Cancel {
                                     output::render_text("Tool call cancelled. Returning to chat...", Some(Color::Yellow), true);
@@ -1036,29 +1256,53 @@ impl CliSession {
                                     permission,
                                 }).await;
                             } else if let Some((elicitation_id, elicitation_message, schema)) = find_elicitation_request(&message) {
+                                if !interactive {
+                                    // Non-interactive/headless mode: cannot collect user input
+                                    tracing::warn!(
+                                        "Elicitation requested in non-interactive mode, cancelling"
+                                    );
+                                    cancel_token_clone.cancel();
+                                    drop(stream);
+                                    return Err(anyhow::anyhow!(
+                                        "Elicitation requested but no interactive terminal is available to collect user input"
+                                    ));
+                                }
+
                                 output::hide_thinking();
                                 let _ = progress_bars.hide();
 
                                 match elicitation::collect_elicitation_input(&elicitation_message, &schema) {
-                                    Ok(Some(user_data)) => {
-                                        let user_data_value = serde_json::to_value(user_data)
+                                    Ok(input) => {
+                                        match &input.action {
+                                            ElicitationAction::Decline => {
+                                                output::render_text("Information request declined.", Some(Color::Yellow), true);
+                                            }
+                                            ElicitationAction::Cancel => {
+                                                output::render_text("Information request cancelled.", Some(Color::Yellow), true);
+                                            }
+                                            ElicitationAction::Accept => {}
+                                        }
+
+                                        let should_cancel = input.action == ElicitationAction::Cancel;
+                                        let action = input.action;
+                                        let user_data_value = serde_json::to_value(input.user_data)
                                             .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
                                         let response_message = Message::user()
                                             .with_content(MessageContent::action_required_elicitation_response(
                                                 elicitation_id,
                                                 user_data_value,
+                                                action,
                                             ))
                                             .with_visibility(false, true);
                                         self.messages.push(response_message.clone());
                                         // Elicitation responses return an empty stream - the response
                                         // unblocks the waiting tool call via ActionRequiredManager
                                         let _ = self.agent.reply(response_message, session_config.clone(), Some(cancel_token.clone())).await?;
-                                    }
-                                    Ok(None) => {
-                                        output::render_text("Information request cancelled.", Some(Color::Yellow), true);
-                                        cancel_token_clone.cancel();
-                                        drop(stream);
-                                        break;
+                                        if should_cancel {
+                                            cancel_token_clone.cancel();
+                                            drop(stream);
+                                            break;
+                                        }
                                     }
                                     Err(e) => {
                                         output::render_error(&format!("Failed to collect input: {}", e));
@@ -1085,6 +1329,9 @@ impl CliSession {
                                     );
                                 }
                             }
+                        }
+                        Some(Ok(AgentEvent::Usage(usage))) => {
+                            last_usage = Some(usage);
                         }
                         Some(Ok(AgentEvent::McpNotification((extension_id, notification)))) => {
                             handle_mcp_notification(
@@ -1142,11 +1389,24 @@ impl CliSession {
                 .await
             {
                 Ok(session) => JsonMetadata {
-                    total_tokens: session.total_tokens,
+                    total_tokens: session
+                        .accumulated_usage
+                        .total_tokens
+                        .or(session.usage.total_tokens),
+                    input_tokens: session
+                        .accumulated_usage
+                        .input_tokens
+                        .or(session.usage.input_tokens),
+                    output_tokens: session
+                        .accumulated_usage
+                        .output_tokens
+                        .or(session.usage.output_tokens),
                     status: "completed".to_string(),
                 },
                 Err(_) => JsonMetadata {
                     total_tokens: None,
+                    input_tokens: None,
+                    output_tokens: None,
                     status: "completed".to_string(),
                 },
             };
@@ -1156,17 +1416,31 @@ impl CliSession {
             };
             println!("{}", serde_json::to_string_pretty(&json_output)?);
         } else if is_stream_json_mode {
-            let total_tokens = self
+            let session = self
                 .agent
                 .config
                 .session_manager
                 .get_session(&self.session_id, false)
                 .await
-                .ok()
-                .and_then(|s| s.total_tokens);
-            emit_stream_event(&StreamEvent::Complete { total_tokens });
+                .ok();
+            let (total_tokens, input_tokens, output_tokens) = match session {
+                Some(s) => (
+                    s.accumulated_usage.total_tokens.or(s.usage.total_tokens),
+                    s.accumulated_usage.input_tokens.or(s.usage.input_tokens),
+                    s.accumulated_usage.output_tokens.or(s.usage.output_tokens),
+                ),
+                None => (None, None, None),
+            };
+            emit_stream_event(&StreamEvent::Complete {
+                total_tokens,
+                input_tokens,
+                output_tokens,
+            });
         } else {
             println!();
+            if self.stats {
+                print_run_stats(run_started, first_token_at, last_usage.as_ref());
+            }
         }
 
         Ok(())
@@ -1319,17 +1593,22 @@ impl CliSession {
             .await
     }
 
-    // Get the session's total token usage
     pub async fn get_total_token_usage(&self) -> Result<Option<i32>> {
         let metadata = self.get_session().await?;
-        Ok(metadata.total_tokens)
+        Ok(metadata.accumulated_usage.total_tokens)
     }
 
     /// Display enhanced context usage with session totals
     pub async fn display_context_usage(&self) -> Result<()> {
         let provider = self.agent.provider().await?;
-        let model_config = provider.get_model_config();
-        let context_limit = model_config.context_limit();
+        let model_config = self
+            .agent
+            .model_config_for_session(&self.session_id)
+            .await?;
+        let context_limit = provider
+            .get_context_limit(&model_config)
+            .await
+            .unwrap_or_else(|_| model_config.context_limit());
 
         let config = Config::global();
         let show_cost = config
@@ -1342,18 +1621,15 @@ impl CliSession {
 
         match self.get_session().await {
             Ok(metadata) => {
-                let total_tokens = metadata.total_tokens.unwrap_or(0) as usize;
+                let total_tokens = metadata.usage.total_tokens.unwrap_or(0) as usize;
 
                 output::display_context_usage(total_tokens, context_limit);
 
                 if show_cost {
-                    let input_tokens = metadata.input_tokens.unwrap_or(0) as usize;
-                    let output_tokens = metadata.output_tokens.unwrap_or(0) as usize;
                     output::display_cost_usage(
                         &provider_name,
                         &model_config.model_name,
-                        input_tokens,
-                        output_tokens,
+                        &metadata.usage,
                     );
                 }
             }
@@ -1484,6 +1760,61 @@ impl CliSession {
 
     fn push_message(&mut self, message: Message) {
         self.messages.push(message);
+    }
+}
+
+fn message_has_text(message: &Message) -> bool {
+    message.content.iter().any(
+        |content| matches!(content, MessageContent::Text(text) if !text.text.trim().is_empty()),
+    )
+}
+
+fn print_run_stats(
+    run_started: Instant,
+    first_token_at: Option<Instant>,
+    usage: Option<&ProviderUsage>,
+) {
+    let elapsed = run_started.elapsed();
+    let output_tokens = usage
+        .and_then(|usage| usage.usage.output_tokens)
+        .and_then(|tokens| usize::try_from(tokens).ok())
+        .or_else(|| usage.and_then(|usage| usage.stats.as_ref()?.output_tokens));
+    let tokens_per_second = output_tokens.map(|tokens| {
+        if elapsed.as_secs_f64() > 0.0 {
+            tokens as f64 / elapsed.as_secs_f64()
+        } else {
+            0.0
+        }
+    });
+
+    eprintln!("\nStats:");
+    match first_token_at {
+        Some(first) => eprintln!(
+            "  Time to first token: {:.2}s",
+            first.duration_since(run_started).as_secs_f64()
+        ),
+        None => eprintln!("  Time to first token: unavailable"),
+    }
+    match tokens_per_second {
+        Some(rate) => eprintln!("  Tokens/sec: {:.2}", rate),
+        None => eprintln!("  Tokens/sec: unavailable"),
+    }
+    if let Some(tokens) = output_tokens {
+        eprintln!("  Output tokens: {tokens}");
+    }
+
+    if let Some(draft) = usage
+        .and_then(|usage| usage.stats.as_ref())
+        .and_then(|stats| stats.draft.as_ref())
+    {
+        eprintln!("  Draft accept rate: {:.1}%", draft.accept_rate * 100.0);
+        eprintln!(
+            "  Draft tokens: {} accepted: {} target verified: {} rounds: {}",
+            draft.draft_tokens, draft.accepted_tokens, draft.target_tokens, draft.rounds
+        );
+        if let Some(model) = &draft.model {
+            eprintln!("  Draft model: {model}");
+        }
     }
 }
 
@@ -1869,11 +2200,11 @@ fn handle_agent_error(e: &anyhow::Error, is_stream_json_mode: bool) {
         });
     }
 
-    if e.downcast_ref::<goose::providers::errors::ProviderError>()
+    if e.downcast_ref::<goose_providers::errors::ProviderError>()
         .map(|provider_error| {
             matches!(
                 provider_error,
-                goose::providers::errors::ProviderError::ContextLengthExceeded(_)
+                goose_providers::errors::ProviderError::ContextLengthExceeded(_)
             )
         })
         .unwrap_or(false)
@@ -1893,8 +2224,8 @@ fn handle_agent_error(e: &anyhow::Error, is_stream_json_mode: bool) {
     }
 }
 
-async fn get_reasoner() -> Result<Arc<dyn Provider>, anyhow::Error> {
-    use goose::model::ModelConfig;
+async fn get_reasoner(
+) -> Result<(Arc<dyn Provider>, goose_providers::model::ModelConfig), anyhow::Error> {
     use goose::providers::create;
 
     let config = Config::global();
@@ -1919,12 +2250,23 @@ async fn get_reasoner() -> Result<Arc<dyn Provider>, anyhow::Error> {
             .expect("No model configured. Run 'goose configure' first")
     };
 
-    let model_config =
-        ModelConfig::new_with_context_env(model, &provider, Some("GOOSE_PLANNER_CONTEXT_LIMIT"))?;
-    let extensions = goose::config::extensions::get_enabled_extensions_with_config(config);
-    let reasoner = create(&provider, model_config, extensions).await?;
+    let planner_context_limit = match env::var(GOOSE_PLANNER_CONTEXT_LIMIT)
+        .ok()
+        .map(|v| v.parse::<usize>())
+    {
+        Some(Ok(n)) if n >= 4096 => Some(n),
+        Some(Ok(_)) => anyhow::bail!("{} must be at least 4096", GOOSE_PLANNER_CONTEXT_LIMIT),
+        Some(Err(e)) => anyhow::bail!("{}: {}", GOOSE_PLANNER_CONTEXT_LIMIT, e),
+        None => None,
+    };
 
-    Ok(reasoner)
+    let model_config =
+        goose::model_config::model_config_from_user_config(&provider, model.as_str())?
+            .with_context_limit(planner_context_limit);
+    let extensions = goose::config::extensions::get_enabled_extensions_with_config(config);
+    let reasoner = create(&provider, extensions).await?;
+
+    Ok((reasoner, model_config))
 }
 
 /// Format elapsed time duration
@@ -1940,11 +2282,27 @@ fn format_elapsed_time(duration: std::time::Duration) -> String {
     }
 }
 
+fn build_switched_model_config(
+    provider_name: &str,
+    model_name: &str,
+    current_model_config: &goose_providers::model::ModelConfig,
+) -> Result<goose_providers::model::ModelConfig> {
+    goose::model_config::model_config_from_user_config(provider_name, model_name)
+        .map(|config| {
+            config
+                .with_temperature(current_model_config.temperature)
+                .with_toolshim(current_model_config.toolshim)
+                .with_toolshim_model(current_model_config.toolshim_model.clone())
+        })
+        .map_err(|e| anyhow::anyhow!("Failed to create model configuration: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use goose::agents::extension::Envs;
     use goose::config::ExtensionConfig;
+    use std::collections::HashMap;
     use std::time::Duration;
     use test_case::test_case;
 
@@ -2024,6 +2382,7 @@ mod tests {
             env_keys: vec![],
             description: goose::config::DEFAULT_EXTENSION_DESCRIPTION.to_string(),
             timeout: Some(goose::config::DEFAULT_EXTENSION_TIMEOUT),
+            cwd: None,
             bundled: None,
             available_tools: vec![],
         }
@@ -2039,6 +2398,7 @@ mod tests {
             env_keys: vec![],
             description: goose::config::DEFAULT_EXTENSION_DESCRIPTION.to_string(),
             timeout: Some(goose::config::DEFAULT_EXTENSION_TIMEOUT),
+            cwd: None,
             bundled: None,
             available_tools: vec![],
         }
@@ -2054,6 +2414,7 @@ mod tests {
             env_keys: vec![],
             description: goose::config::DEFAULT_EXTENSION_DESCRIPTION.to_string(),
             timeout: Some(goose::config::DEFAULT_EXTENSION_TIMEOUT),
+            cwd: None,
             bundled: None,
             available_tools: vec![],
         }
@@ -2069,20 +2430,87 @@ mod tests {
     }
 
     #[test]
-    fn test_split_quoted_windows_paths() {
+    fn test_build_switched_model_config_rebuilds_target_model_settings() {
+        let _guard = env_lock::lock_env([
+            ("GOOSE_MAX_TOKENS", None::<&str>),
+            ("GOOSE_TEMPERATURE", None::<&str>),
+            ("GOOSE_CONTEXT_LIMIT", None::<&str>),
+            ("GOOSE_TOOLSHIM", None::<&str>),
+            ("GOOSE_TOOLSHIM_OLLAMA_MODEL", None::<&str>),
+        ]);
+
+        let current_model_config = goose_providers::model::ModelConfig {
+            model_name: "gpt-4o".to_string(),
+            context_limit: Some(128_000),
+            temperature: Some(0.25),
+            max_tokens: Some(16_384),
+            toolshim: true,
+            toolshim_model: Some("qwen2.5-coder".to_string()),
+            request_params: Some(HashMap::from([(
+                "anthropic_beta".to_string(),
+                serde_json::json!(["output-128k-2025-02-19"]),
+            )])),
+            reasoning: Some(false),
+        };
+
+        let switched =
+            build_switched_model_config("openai", "gpt-5.4", &current_model_config).unwrap();
+        let expected = goose_providers::model::ModelConfig::new("gpt-5.4")
+            .with_canonical_limits("openai")
+            .with_temperature(Some(0.25))
+            .with_toolshim(true)
+            .with_toolshim_model(Some("qwen2.5-coder".to_string()));
+
+        assert_eq!(switched.model_name, expected.model_name);
+        assert_eq!(switched.context_limit, expected.context_limit);
+        assert_eq!(switched.max_tokens, expected.max_tokens);
+        assert_eq!(switched.request_params, expected.request_params);
+        assert_eq!(switched.reasoning, expected.reasoning);
+        assert_eq!(switched.temperature, Some(0.25));
+        assert!(switched.toolshim);
+        assert_eq!(switched.toolshim_model.as_deref(), Some("qwen2.5-coder"));
+    }
+
+    #[test]
+    fn test_build_switched_model_config_detects_effort_suffix_change() {
+        let _guard = env_lock::lock_env([
+            ("GOOSE_MAX_TOKENS", None::<&str>),
+            ("GOOSE_TEMPERATURE", None::<&str>),
+            ("GOOSE_CONTEXT_LIMIT", None::<&str>),
+            ("GOOSE_TOOLSHIM", None::<&str>),
+            ("GOOSE_TOOLSHIM_OLLAMA_MODEL", None::<&str>),
+            ("GOOSE_THINKING_EFFORT", None::<&str>),
+        ]);
+
+        let current = goose_providers::model::ModelConfig::new("gpt-5.4-high")
+            .with_canonical_limits("openai");
+        assert_eq!(current.model_name, "gpt-5.4");
         assert_eq!(
-            split_quoted(r"C:\tools\mcp.exe --arg value").unwrap(),
+            current.thinking_effort(),
+            Some(goose_providers::thinking::ThinkingEffort::High)
+        );
+
+        let switched = build_switched_model_config("openai", "gpt-5.4", &current).unwrap();
+
+        assert_eq!(switched.model_name, current.model_name);
+        assert_ne!(switched.thinking_effort(), current.thinking_effort());
+    }
+
+    #[test]
+    fn test_split_command_args_windows_paths() {
+        assert_eq!(
+            goose::utils::split_command_args(r"C:\tools\mcp.exe --arg value").unwrap(),
             vec![r"C:\tools\mcp.exe", "--arg", "value"]
         );
         assert_eq!(
-            split_quoted(r#""C:\Program Files\server\mcp.exe" --arg"#).unwrap(),
+            goose::utils::split_command_args(r#""C:\Program Files\server\mcp.exe" --arg"#).unwrap(),
             vec![r"C:\Program Files\server\mcp.exe", "--arg"]
         );
     }
 
     #[test]
-    fn test_split_quoted_unmatched_quote() {
-        assert!(split_quoted(r#""unmatched"#).is_err());
+    fn test_split_command_args_unmatched_quote() {
+        assert!(goose::utils::split_command_args(r#""unmatched"#).is_err());
     }
 
     #[test_case(
@@ -2095,6 +2523,7 @@ mod tests {
             headers: HashMap::new(),
             description: goose::config::DEFAULT_EXTENSION_DESCRIPTION.to_string(),
             timeout: Some(300),
+            socket: None,
             bundled: None,
             available_tools: vec![],
         }
@@ -2110,6 +2539,7 @@ mod tests {
             headers: HashMap::new(),
             description: goose::config::DEFAULT_EXTENSION_DESCRIPTION.to_string(),
             timeout: Some(300),
+            socket: None,
             bundled: None,
             available_tools: vec![],
         }
@@ -2125,6 +2555,7 @@ mod tests {
             headers: HashMap::new(),
             description: goose::config::DEFAULT_EXTENSION_DESCRIPTION.to_string(),
             timeout: Some(300),
+            socket: None,
             bundled: None,
             available_tools: vec![],
         }

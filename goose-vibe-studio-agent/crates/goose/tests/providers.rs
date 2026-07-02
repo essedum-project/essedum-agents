@@ -16,7 +16,6 @@ use goose::providers::claude_code::CLAUDE_CODE_DEFAULT_MODEL;
 use goose::providers::codex::CODEX_DEFAULT_MODEL;
 use goose::providers::create_with_named_model;
 use goose::providers::databricks::DATABRICKS_DEFAULT_MODEL;
-use goose::providers::errors::ProviderError;
 use goose::providers::google::GOOGLE_DEFAULT_MODEL;
 use goose::providers::litellm::LITELLM_DEFAULT_MODEL;
 use goose::providers::openai::OPEN_AI_DEFAULT_MODEL;
@@ -25,6 +24,7 @@ use goose::providers::sagemaker_tgi::SAGEMAKER_TGI_DEFAULT_MODEL;
 use goose::providers::snowflake::SNOWFLAKE_DEFAULT_MODEL;
 use goose::providers::xai::XAI_DEFAULT_MODEL;
 use goose::session::{SessionManager, SessionType};
+use goose_providers::errors::ProviderError;
 use goose_test_support::{
     EnforceSessionId, ExpectedSessionId, IgnoreSessionId, McpFixture, FAKE_CODE,
 };
@@ -90,10 +90,9 @@ impl TestReport {
     }
 }
 
-lazy_static::lazy_static! {
-    static ref TEST_REPORT: Arc<TestReport> = TestReport::new();
-    static ref ENV_LOCK: Mutex<()> = Mutex::new(());
-}
+static TEST_REPORT: std::sync::LazyLock<Arc<TestReport>> =
+    std::sync::LazyLock::new(TestReport::new);
+static ENV_LOCK: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| Mutex::new(()));
 
 struct ProviderFixture {
     name: String,
@@ -102,6 +101,7 @@ struct ProviderFixture {
     expect_context_length_exceeded: bool,
     context_length_exceeded: usize,
     provider: Arc<dyn Provider>,
+    model_config: goose_providers::model::ModelConfig,
     agent: Agent,
     session_id: String,
     _mcp: McpFixture,
@@ -162,11 +162,6 @@ impl ProviderTestConfig {
         self
     }
 
-    fn clear_env(mut self, vars: &'static [&'static str]) -> Self {
-        self.clear_env = vars;
-        self
-    }
-
     fn test_permissions(mut self, v: bool) -> Self {
         self.test_permissions = v;
         self
@@ -189,6 +184,12 @@ impl ProviderTestConfig {
 
     fn context_length_exceeded(mut self, token_count: usize) -> Self {
         self.context_length_exceeded = token_count;
+        self
+    }
+
+    #[allow(dead_code)] // only used by tests that are behind non-default feature flags
+    fn clear_env(mut self, vars: &'static [&'static str]) -> Self {
+        self.clear_env = vars;
         self
     }
 
@@ -234,11 +235,14 @@ impl ProviderFixture {
 
         let provider = create_with_named_model(
             &config.name.to_lowercase(),
-            config.model_name,
             vec![mcp_extension.clone(), developer_extension.clone()],
         )
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let model_config = goose::model_config::model_config_from_user_config(
+            &config.name.to_lowercase(),
+            config.model_name,
+        )?;
 
         let temp_dir = tempfile::tempdir()?;
         let session_manager = Arc::new(SessionManager::new(temp_dir.path().to_path_buf()));
@@ -262,7 +266,9 @@ impl ProviderFixture {
             .await?;
         let session_id = session.id;
         expected_session_id.set(&session_id);
-        agent.update_provider(provider.clone(), &session_id).await?;
+        agent
+            .update_provider(provider.clone(), model_config.clone(), &session_id)
+            .await?;
         agent
             .add_extension(mcp_extension, &session_id)
             .await
@@ -279,8 +285,9 @@ impl ProviderFixture {
             expect_context_length_exceeded: config.expect_context_length_exceeded,
             context_length_exceeded: config.context_length_exceeded,
             provider,
+            model_config,
             agent,
-            session_id,
+            session_id: session_id.to_string(),
             _mcp: mcp,
             _guard: guard,
             _temp_dir: temp_dir,
@@ -290,7 +297,7 @@ impl ProviderFixture {
     async fn tool_roundtrip(
         &self,
         prompt: &str,
-        model_config: Option<goose::model::ModelConfig>,
+        model_config: Option<goose_providers::model::ModelConfig>,
     ) -> Result<Message> {
         let tools = self
             .agent
@@ -310,17 +317,17 @@ impl ProviderFixture {
             .build();
 
         let message = Message::user().with_text(prompt);
-        let model_config = model_config.unwrap_or_else(|| self.provider.get_model_config());
-        let (response1, _) = self
-            .provider
-            .complete(
+        let model_config = model_config.unwrap_or_else(|| self.model_config.clone());
+        let (response1, _) = goose::session_context::with_session_id(
+            Some(self.session_id.clone()),
+            self.provider.complete(
                 &model_config,
-                &self.session_id,
                 &system,
                 std::slice::from_ref(&message),
                 &tools,
-            )
-            .await?;
+            ),
+        )
+        .await?;
 
         // Agentic CLI providers (claude-code, codex) call tools internally and
         // return the final text result directly — no tool_request in the response.
@@ -334,6 +341,11 @@ impl ProviderFixture {
             Some(req) => req,
             None => return Ok(response1),
         };
+
+        // Provider already executed an externally-dispatched tool — don't redispatch.
+        if tool_req.is_externally_dispatched() {
+            return Ok(response1);
+        }
 
         let params = tool_req.tool_call.as_ref().unwrap().clone();
         let ctx = goose::agents::ToolCallContext::new(
@@ -352,33 +364,33 @@ impl ProviderFixture {
             .unwrap();
         let tool_response = Message::user().with_tool_response(&tool_req.id, Ok(result));
 
-        let (response2, _) = self
-            .provider
-            .complete(
+        let (response2, _) = goose::session_context::with_session_id(
+            Some(self.session_id.clone()),
+            self.provider.complete(
                 &model_config,
-                &self.session_id,
                 &system,
                 &[message, response1, tool_response],
                 &tools,
-            )
-            .await?;
+            ),
+        )
+        .await?;
         Ok(response2)
     }
 
     async fn test_basic_response(&self) -> Result<()> {
         let message = Message::user().with_text("Just say hello!");
-        let model_config = self.provider.get_model_config();
+        let model_config = self.model_config.clone();
 
-        let (response, _) = self
-            .provider
-            .complete(
+        let (response, _) = goose::session_context::with_session_id(
+            Some(self.session_id.clone()),
+            self.provider.complete(
                 &model_config,
-                &self.session_id,
                 "You are a helpful assistant.",
                 &[message],
                 &[],
-            )
-            .await?;
+            ),
+        )
+        .await?;
 
         assert!(!response.content.is_empty());
         assert!(response
@@ -408,18 +420,18 @@ impl ProviderFixture {
         // "hello " ≈ 2 tokens across common tokenizers
         let large_message_content = "hello ".repeat(self.context_length_exceeded / 2);
         let messages = vec![Message::user().with_text(&large_message_content)];
-        let model_config = self.provider.get_model_config();
+        let model_config = self.model_config.clone();
 
-        let result = self
-            .provider
-            .complete(
+        let result = goose::session_context::with_session_id(
+            Some(self.session_id.clone()),
+            self.provider.complete(
                 &model_config,
-                &self.session_id,
                 "You are a helpful assistant.",
                 &messages,
                 &[],
-            )
-            .await;
+            ),
+        )
+        .await;
 
         println!("=== {}::context_length_exceeded_error ===", self.name);
         dbg!(&result);
@@ -439,12 +451,9 @@ impl ProviderFixture {
     }
 
     async fn test_image_content_support(&self) -> Result<()> {
-        let image_config = match &self.image_model {
-            Some(model) => {
-                Some(goose::model::ModelConfig::new(model)?.with_canonical_limits(&self.name))
-            }
-            None => None,
-        };
+        let image_config = self.image_model.as_ref().map(|model| {
+            goose_providers::model::ModelConfig::new(model).with_canonical_limits(&self.name)
+        });
         let response = self
             .tool_roundtrip(
                 "Use the get_image tool and describe what you see in its result.",
@@ -461,21 +470,18 @@ impl ProviderFixture {
     }
 
     async fn test_model_switch(&self) -> Result<()> {
-        let default = &self.provider.get_model_config().model_name;
+        let default = &self.model_config.model_name;
         let alt = self.model_switch_name.as_deref().unwrap();
-        let alt_config = goose::model::ModelConfig::new(alt)?.with_canonical_limits(&self.name);
+        let alt_config =
+            goose_providers::model::ModelConfig::new(alt).with_canonical_limits(&self.name);
 
         let message = Message::user().with_text("Just say hello!");
-        let (response, _) = self
-            .provider
-            .complete(
-                &alt_config,
-                &self.session_id,
-                "You are a helpful assistant.",
-                &[message],
-                &[],
-            )
-            .await?;
+        let (response, _) = goose::session_context::with_session_id(
+            Some(self.session_id.clone()),
+            self.provider
+                .complete(&alt_config, "You are a helpful assistant.", &[message], &[]),
+        )
+        .await?;
 
         assert!(response
             .content
@@ -499,7 +505,7 @@ impl ProviderFixture {
         println!("===================");
 
         assert!(!models.is_empty());
-        let resolved = &self.provider.get_model_config().model_name;
+        let resolved = &self.model_config.model_name;
         assert_ne!(resolved.as_str(), ACP_CURRENT_MODEL);
         assert!(models
             .iter()
@@ -883,7 +889,7 @@ async fn test_codex_provider() -> Result<()> {
         .await
 }
 
-// Requires: npm install -g @zed-industries/claude-agent-acp
+// Requires: npm install -g @agentclientprotocol/claude-agent-acp
 #[tokio::test]
 async fn test_claude_acp_provider() -> Result<()> {
     ProviderTestConfig::with_agentic_provider("claude-acp", ACP_CURRENT_MODEL, "claude-agent-acp")
@@ -913,7 +919,7 @@ async fn test_copilot_acp_provider() -> Result<()> {
         .await
 }
 
-#[ctor::dtor]
+#[dtor::dtor(unsafe)]
 fn print_test_report() {
     TEST_REPORT.print_summary();
 }

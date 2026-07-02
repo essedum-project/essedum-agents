@@ -35,7 +35,7 @@ import { PanelLeft } from 'lucide-react';
         <h3>Option 2: Install via Homebrew</h3>
         Homebrew downloads the [same app](https://github.com/Homebrew/homebrew-cask/blob/master/Casks/b/block-goose.rb) but can take care of updates too.
         ```bash
-          brew install --cask block-goose
+        brew install --cask block-goose
         ```
         ---
         <div style={{ marginTop: '1rem' }}>
@@ -152,7 +152,7 @@ import { PanelLeft } from 'lucide-react';
         - **MSYS2**: Available from [msys2.org](https://www.msys2.org/)
         - **PowerShell**: Available on Windows 10/11 by default
 
-        Run the installation command in your chosen environment:
+        **Git Bash / MSYS2: Standard**
 
         ```bash
         curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | bash
@@ -164,7 +164,7 @@ import { PanelLeft } from 'lucide-react';
         curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash
         ```
 
-        **PowerShell Installation:**
+        **PowerShell Installation: Standard**
         Download the PowerShell installation script to your current directory.
 
         ```powershell

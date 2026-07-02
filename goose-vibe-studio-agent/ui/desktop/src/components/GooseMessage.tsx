@@ -2,6 +2,7 @@ import { useMemo, useRef } from 'react';
 import ImagePreview from './ImagePreview';
 import { formatMessageTimestamp } from '../utils/timeUtils';
 import MarkdownContent from './MarkdownContent';
+import ThinkingContent from './ThinkingContent';
 import ToolCallWithResponse from './ToolCallWithResponse';
 import {
   getTextAndImageContent,
@@ -33,7 +34,7 @@ interface GooseMessageProps {
   submitElicitationResponse?: (
     elicitationId: string,
     userData: Record<string, unknown>
-  ) => Promise<void>;
+  ) => Promise<boolean>;
 }
 
 export default function GooseMessage({
@@ -47,26 +48,8 @@ export default function GooseMessage({
 }: GooseMessageProps) {
   const contentRef = useRef<HTMLDivElement | null>(null);
 
-  let { textContent, imagePaths } = getTextAndImageContent(message);
+  const { textContent: displayText, imagePaths } = getTextAndImageContent(message);
   const thinkingContent = getThinkingContent(message);
-
-  const splitChainOfThought = (text: string): { displayText: string; cotText: string | null } => {
-    const regex = /<think>([\s\S]*?)<\/think>/i;
-    const match = text.match(regex);
-    if (!match) {
-      return { displayText: text, cotText: null };
-    }
-
-    const cotRaw = match[1].trim();
-    const displayText = text.replace(regex, '').trim();
-
-    return {
-      displayText,
-      cotText: cotRaw || null,
-    };
-  };
-
-  const { displayText, cotText } = splitChainOfThought(textContent);
 
   const timestamp = useMemo(() => formatMessageTimestamp(message.created), [message.created]);
   const toolRequests = getToolRequests(message);
@@ -92,6 +75,13 @@ export default function GooseMessage({
   );
   const hasToolConfirmation = toolConfirmationContent !== undefined;
   const hasElicitation = elicitationContent !== undefined;
+  const elicitationData =
+    elicitationContent?.data.actionType === 'elicitation'
+      ? (elicitationContent.data as typeof elicitationContent.data & {
+          isSubmitted?: boolean;
+          isCancelled?: boolean;
+        })
+      : undefined;
 
   const toolConfirmationShownInline = useMemo(() => {
     if (!toolConfirmationContent) return false;
@@ -132,15 +122,15 @@ export default function GooseMessage({
     <div className="goose-message flex w-[90%] justify-start min-w-0">
       <div className="flex flex-col w-full min-w-0">
         {thinkingContent && (
-          <div className="mb-2 text-xs text-gray-400/70 italic">
-            <MarkdownContent content={thinkingContent} />
-          </div>
-        )}
-
-        {cotText && (
-          <div className="mb-2 text-sm text-gray-400 italic">
-            <MarkdownContent content={cotText} />
-          </div>
+          <ThinkingContent
+            content={thinkingContent}
+            isExpanded={
+              isStreaming &&
+              !displayText.trim() &&
+              imagePaths.length === 0 &&
+              toolRequests.length === 0
+            }
+          />
         )}
 
         {(displayText.trim() || imagePaths.length > 0) && (
@@ -220,8 +210,8 @@ export default function GooseMessage({
 
         {hasElicitation && submitElicitationResponse && (
           <ElicitationRequest
-            isCancelledMessage={false}
-            isClicked={false}
+            isCancelledMessage={elicitationData?.isCancelled === true}
+            isClicked={elicitationData?.isSubmitted === true}
             actionRequiredContent={elicitationContent}
             onSubmit={submitElicitationResponse}
           />

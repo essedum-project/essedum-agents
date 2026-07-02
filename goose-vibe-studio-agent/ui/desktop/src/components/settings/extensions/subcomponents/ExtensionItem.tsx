@@ -97,18 +97,22 @@ export default function ExtensionItem({
             {editable && (
               <button
                 className="text-text-secondary hover:text-text-primary"
-                aria-label={intl.formatMessage(i18n.configureExtension, { name: getFriendlyTitle(extension) })}
+                aria-label={intl.formatMessage(i18n.configureExtension, {
+                  name: getFriendlyTitle(extension),
+                })}
                 onClick={() => onConfigure?.(extension)}
               >
                 <Gear className="w-4 h-4" />
               </button>
             )}
             <Switch
-              checked={(isToggling && visuallyEnabled) || extension.enabled}
+              checked={visuallyEnabled}
               onCheckedChange={() => handleToggle(extension)}
               disabled={isToggling}
               variant="mono"
-              aria-label={intl.formatMessage(i18n.toggleExtension, { name: getFriendlyTitle(extension) })}
+              aria-label={intl.formatMessage(i18n.toggleExtension, {
+                name: getFriendlyTitle(extension),
+              })}
             />
           </div>
         </CardAction>

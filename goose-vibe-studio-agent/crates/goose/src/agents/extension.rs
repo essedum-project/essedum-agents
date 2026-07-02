@@ -58,12 +58,22 @@ pub enum ExtensionError {
 
 pub type ExtensionResult<T> = Result<T, ExtensionError>;
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default, ToSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, Default, ToSchema, PartialEq)]
 pub struct Envs {
     /// A map of environment variables to set, e.g. API_KEY -> some_secret, HOST -> host
     #[serde(default)]
     #[serde(flatten)]
     map: HashMap<String, String>,
+}
+
+impl<'de> Deserialize<'de> for Envs {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let map = HashMap::<String, String>::deserialize(deserializer)?;
+        Ok(Self::new(map))
+    }
 }
 
 impl Envs {
@@ -181,8 +191,11 @@ pub enum ExtensionConfig {
         env_keys: Vec<String>,
         timeout: Option<u64>,
         #[serde(default)]
+        cwd: Option<String>,
+        #[serde(default)]
         bundled: Option<bool>,
         #[serde(default)]
+        #[serde(skip_serializing_if = "Vec::is_empty")]
         available_tools: Vec<String>,
     },
     /// Built-in extension that is part of the bundled goose MCP server
@@ -199,6 +212,7 @@ pub enum ExtensionConfig {
         #[serde(default)]
         bundled: Option<bool>,
         #[serde(default)]
+        #[serde(skip_serializing_if = "Vec::is_empty")]
         available_tools: Vec<String>,
     },
     /// Platform extensions that have direct access to the agent etc and run in the agent process
@@ -214,6 +228,7 @@ pub enum ExtensionConfig {
         #[serde(default)]
         bundled: Option<bool>,
         #[serde(default)]
+        #[serde(skip_serializing_if = "Vec::is_empty")]
         available_tools: Vec<String>,
     },
     /// Streamable HTTP client with a URI endpoint using MCP Streamable HTTP specification
@@ -235,9 +250,16 @@ pub enum ExtensionConfig {
         // NOTE: set timeout to be optional for compatibility.
         // However, new configurations should include this field.
         timeout: Option<u64>,
+        /// Optional Unix domain socket path for HTTP-over-UDS transport.
+        /// When set, the HTTP connection is routed through this socket while
+        /// `uri` is used for the Host header and path.
+        /// Use `@name` for Linux abstract sockets.
+        #[serde(default)]
+        socket: Option<String>,
         #[serde(default)]
         bundled: Option<bool>,
         #[serde(default)]
+        #[serde(skip_serializing_if = "Vec::is_empty")]
         available_tools: Vec<String>,
     },
     /// Frontend-provided tools that will be called through the frontend
@@ -256,6 +278,7 @@ pub enum ExtensionConfig {
         #[serde(default)]
         bundled: Option<bool>,
         #[serde(default)]
+        #[serde(skip_serializing_if = "Vec::is_empty")]
         available_tools: Vec<String>,
     },
     /// Inline Python code that will be executed using uvx
@@ -275,6 +298,7 @@ pub enum ExtensionConfig {
         #[serde(default)]
         dependencies: Option<Vec<String>>,
         #[serde(default)]
+        #[serde(skip_serializing_if = "Vec::is_empty")]
         available_tools: Vec<String>,
     },
 }
@@ -307,6 +331,7 @@ impl ExtensionConfig {
             headers: HashMap::new(),
             description: description.into(),
             timeout: Some(timeout.into()),
+            socket: None,
             bundled: None,
             available_tools: Vec::new(),
         }
@@ -326,6 +351,7 @@ impl ExtensionConfig {
             env_keys: Vec::new(),
             description: description.into(),
             timeout: Some(timeout.into()),
+            cwd: None,
             bundled: None,
             available_tools: Vec::new(),
         }
@@ -359,6 +385,7 @@ impl ExtensionConfig {
                 envs,
                 env_keys,
                 timeout,
+                cwd,
                 description,
                 bundled,
                 available_tools,
@@ -371,6 +398,7 @@ impl ExtensionConfig {
                 args: args.into_iter().map(Into::into).collect(),
                 description,
                 timeout,
+                cwd,
                 bundled,
                 available_tools,
             },
@@ -436,6 +464,7 @@ impl ExtensionConfig {
                 envs,
                 env_keys,
                 timeout,
+                cwd,
                 bundled,
                 available_tools,
             } => {
@@ -445,9 +474,10 @@ impl ExtensionConfig {
                     description,
                     cmd,
                     args,
-                    envs: Envs::new(merged),
+                    envs: Envs::new(merged.clone()),
                     env_keys: vec![],
                     timeout,
+                    cwd: cwd.map(|s| substitute_env_vars(&s, &merged)),
                     bundled,
                     available_tools,
                 })
@@ -460,6 +490,7 @@ impl ExtensionConfig {
                 env_keys,
                 headers,
                 timeout,
+                socket,
                 bundled,
                 available_tools,
             } => {
@@ -471,6 +502,7 @@ impl ExtensionConfig {
                         (k, v)
                     })
                     .collect();
+                let socket = socket.map(|s| substitute_env_vars(&s, &merged));
                 Ok(Self::StreamableHttp {
                     name,
                     description,
@@ -479,6 +511,7 @@ impl ExtensionConfig {
                     env_keys: vec![],
                     headers,
                     timeout,
+                    socket,
                     bundled,
                     available_tools,
                 })
@@ -494,8 +527,14 @@ impl std::fmt::Display for ExtensionConfig {
             ExtensionConfig::Sse { name, .. } => {
                 write!(f, "SSE({}: unsupported)", name)
             }
-            ExtensionConfig::StreamableHttp { name, uri, .. } => {
-                write!(f, "StreamableHttp({}: {})", name, uri)
+            ExtensionConfig::StreamableHttp {
+                name, uri, socket, ..
+            } => {
+                if let Some(socket) = socket {
+                    write!(f, "StreamableHttp({}: {} via {})", name, uri, socket)
+                } else {
+                    write!(f, "StreamableHttp({}: {})", name, uri)
+                }
             }
             ExtensionConfig::Stdio {
                 name, cmd, args, ..
@@ -642,6 +681,49 @@ available_tools: []
         }
     }
 
+    #[test]
+    fn envs_deserialization_filters_disallowed_keys() {
+        let envs: extension::Envs =
+            serde_yaml::from_str("LD_PRELOAD: /tmp/injected.so\nSAFE_VAR: ok\n").unwrap();
+        let map = envs.get_env();
+
+        assert!(!map.contains_key("LD_PRELOAD"));
+        assert_eq!(map.get("SAFE_VAR"), Some(&"ok".to_string()));
+    }
+
+    #[test]
+    fn serialization_omits_empty_available_tools() {
+        let config = ExtensionConfig::Builtin {
+            name: "developer".into(),
+            description: "dev".into(),
+            display_name: Some("Developer".into()),
+            timeout: Some(300),
+            bundled: Some(true),
+            available_tools: vec![],
+        };
+
+        let yaml = serde_yaml::to_string(&config).unwrap();
+
+        assert!(!yaml.contains("available_tools"));
+    }
+
+    #[test]
+    fn serialization_preserves_available_tools() {
+        let config = ExtensionConfig::Builtin {
+            name: "developer".into(),
+            description: "dev".into(),
+            display_name: Some("Developer".into()),
+            timeout: Some(300),
+            bundled: Some(true),
+            available_tools: vec!["shell".to_string()],
+        };
+
+        let yaml = serde_yaml::to_string(&config).unwrap();
+
+        assert!(yaml.contains("available_tools"));
+        assert!(yaml.contains("- shell"));
+    }
+
     #[test_case(
         ExtensionConfig::Builtin {
             name: "developer".into(),
@@ -679,6 +761,7 @@ available_tools: []
             .into_iter()
             .collect(),
             timeout: None,
+            socket: None,
             bundled: None,
             available_tools: vec![],
         },
@@ -699,6 +782,7 @@ available_tools: []
             .into_iter()
             .collect(),
             timeout: None,
+            socket: None,
             bundled: None,
             available_tools: vec![],
         }
@@ -713,6 +797,7 @@ available_tools: []
             envs: extension::Envs::default(),
             env_keys: vec![],
             timeout: None,
+            cwd: None,
             bundled: None,
             available_tools: vec![],
         },
@@ -724,6 +809,7 @@ available_tools: []
             envs: extension::Envs::default(),
             env_keys: vec![],
             timeout: None,
+            cwd: None,
             bundled: None,
             available_tools: vec![],
         }
@@ -738,6 +824,7 @@ available_tools: []
             envs: extension::Envs::default(),
             env_keys: vec!["MY_SECRET".into()],
             timeout: None,
+            cwd: None,
             bundled: None,
             available_tools: vec![],
         },
@@ -753,6 +840,7 @@ available_tools: []
             }),
             env_keys: vec![],
             timeout: None,
+            cwd: None,
             bundled: None,
             available_tools: vec![],
         }
@@ -772,6 +860,7 @@ available_tools: []
             .into_iter()
             .collect(),
             timeout: None,
+            socket: None,
             bundled: None,
             available_tools: vec![],
         },
@@ -789,6 +878,7 @@ available_tools: []
                 .into_iter()
                 .collect(),
             timeout: None,
+            socket: None,
             bundled: None,
             available_tools: vec![],
         }
@@ -803,6 +893,7 @@ available_tools: []
             env_keys: vec!["MY_SECRET".into()],
             headers: std::collections::HashMap::new(),
             timeout: None,
+            socket: None,
             bundled: None,
             available_tools: vec![],
         },
@@ -818,6 +909,7 @@ available_tools: []
             env_keys: vec![],
             headers: std::collections::HashMap::new(),
             timeout: None,
+            socket: None,
             bundled: None,
             available_tools: vec![],
         }
@@ -836,6 +928,7 @@ available_tools: []
             }),
             env_keys: vec!["MY_SECRET".into()],
             timeout: None,
+            cwd: None,
             bundled: None,
             available_tools: vec![],
         },
@@ -851,6 +944,7 @@ available_tools: []
             }),
             env_keys: vec![],
             timeout: None,
+            cwd: None,
             bundled: None,
             available_tools: vec![],
         }
@@ -866,5 +960,45 @@ available_tools: []
         .unwrap();
         cfg.set("MY_SECRET", &"secret_value", true).unwrap();
         assert_eq!(config.resolve(&cfg).await.unwrap(), expected);
+    }
+
+    #[test]
+    fn test_display_streamable_http_with_socket() {
+        let config = ExtensionConfig::StreamableHttp {
+            name: "test".into(),
+            description: String::new(),
+            uri: "http://localhost:8080/mcp".into(),
+            envs: extension::Envs::default(),
+            env_keys: vec![],
+            headers: std::collections::HashMap::new(),
+            timeout: None,
+            socket: Some("@egress.sock".to_string()),
+            bundled: None,
+            available_tools: vec![],
+        };
+        assert_eq!(
+            config.to_string(),
+            "StreamableHttp(test: http://localhost:8080/mcp via @egress.sock)"
+        );
+    }
+
+    #[test]
+    fn test_display_streamable_http_without_socket() {
+        let config = ExtensionConfig::StreamableHttp {
+            name: "test".into(),
+            description: String::new(),
+            uri: "http://localhost:8080/mcp".into(),
+            envs: extension::Envs::default(),
+            env_keys: vec![],
+            headers: std::collections::HashMap::new(),
+            timeout: None,
+            socket: None,
+            bundled: None,
+            available_tools: vec![],
+        };
+        assert_eq!(
+            config.to_string(),
+            "StreamableHttp(test: http://localhost:8080/mcp)"
+        );
     }
 }

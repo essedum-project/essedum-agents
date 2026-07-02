@@ -1,12 +1,13 @@
 ---
 title: "Gas Town Explained: How to Use Goosetown for Parallel Agentic Engineering"
 description: "Learn how Gas Town and Goosetown lead the industrial coding revolution by teaching AI agents to work together in a team. This beginner guide explains the infrastructure we're using to move from talking to one AI to coordinating many agents at once."
+image: /img/blog/goosetown.png
 authors:
   - rizel
   - tyler
 ---
 
-![Goosetown](goosetown.png)
+![Goosetown](/img/blog/goosetown.png)
 
 On New Year's Day 2026, while many were recovering from the night before, a different kind of hangover took hold of every AI-pilled, chronically online software engineer. Steve Yegge published a new blog post: "[Welcome to Gas Town](https://steve-yegge.medium.com/welcome-to-gas-town-4f25ee16dd04)." Some walked away inspired to finally use their agents optimally; others were just plain confused. If you're like me, you felt a bit of both. 
 
@@ -68,7 +69,7 @@ Here's a real Town Wall snippet from a session where parallel researchers conver
 * **[10:14] researcher-endpoints** - 💡 Found: native endpoint already exists with minimal deps. Alternative path viable.   
 * **[10:15] researcher-source** - ✅ Done. Confirmed: native path requires zero new dependencies. Recommending pivot.
 
-Goosetown operates on 4 components: [skills](/docs/guides/context-engineering/using-skills), [subagents](/docs/guides/subagents), [beads](https://github.com/steveyegge/beads), and a [gtwall](https://github.com/aaif-goose/goosetown/blob/main/gtwall).
+Goosetown operates on 4 components: [skills](/docs/guides/context-engineering/using-skills), [subagents](/docs/guides/context-engineering/subagents), [beads](https://github.com/steveyegge/beads), and a [gtwall](https://github.com/aaif-goose/goosetown/blob/main/gtwall).
 
 ### Skills
 
@@ -76,7 +77,7 @@ Goosetown operates on 4 components: [skills](/docs/guides/context-engineering/us
 
 ### Subagents
 
-Instead of doing everything in one long conversation that eventually hits a "context cliff," Goosetown uses [subagents](/docs/guides/subagents), ephemeral agent instances. These are triggered by the [summon extension](/docs/mcp/summon-mcp), using `delegate()` to hand off work to a fresh agent instance. They do the work in their own clean context and return a summary, keeping your main session fast and focused.
+Instead of doing everything in one long conversation that eventually hits a "context cliff," Goosetown uses [subagents](/docs/guides/context-engineering/subagents), ephemeral agent instances. These are triggered by the [summon extension](/docs/mcp/summon-mcp), using `delegate()` to hand off work to a fresh agent instance. They do the work in their own clean context and return a summary, keeping your main session fast and focused.
 
 ### Beads
 

@@ -6,7 +6,7 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import SuspenseLoader from './suspense-loader';
 import { client } from './api/client.gen';
 import { setTelemetryEnabled } from './utils/analytics';
-import { readConfig } from './api';
+import { acpReadConfig } from './acp/config';
 import { applyThemeTokens } from './theme/theme-tokens';
 import { currentLocale, currentMessageLocale, loadMessages } from './i18n';
 
@@ -16,6 +16,20 @@ applyThemeTokens();
 const App = lazy(() => import('./App'));
 
 const TELEMETRY_CONFIG_KEY = 'GOOSE_TELEMETRY_ENABLED';
+
+let warnedFallbackLocale = false;
+function handleIntlError(err: { code: string; message?: string }) {
+  if (err.code === 'MISSING_TRANSLATION' && currentLocale !== currentMessageLocale) {
+    if (!warnedFallbackLocale) {
+      warnedFallbackLocale = true;
+      console.warn(
+        `[i18n] Locale "${currentLocale}" has no translations; falling back to "${currentMessageLocale}".`
+      );
+    }
+    return;
+  }
+  console.error(err);
+}
 
 (async () => {
   // Check if we're in the launcher view (doesn't need goosed connection)
@@ -36,10 +50,8 @@ const TELEMETRY_CONFIG_KEY = 'GOOSE_TELEMETRY_ENABLED';
     });
 
     try {
-      const telemetryResponse = await readConfig({
-        body: { key: TELEMETRY_CONFIG_KEY, is_secret: false },
-      });
-      const isTelemetryEnabled = telemetryResponse.data !== false;
+      const telemetryValue = await acpReadConfig(TELEMETRY_CONFIG_KEY, false);
+      const isTelemetryEnabled = telemetryValue !== false;
       setTelemetryEnabled(isTelemetryEnabled);
     } catch (error) {
       console.warn('[Analytics] Failed to initialize analytics:', error);
@@ -50,7 +62,12 @@ const TELEMETRY_CONFIG_KEY = 'GOOSE_TELEMETRY_ENABLED';
 
   ReactDOM.createRoot(document.getElementById('root')!).render(
     <React.StrictMode>
-      <IntlProvider locale={currentLocale} defaultLocale="en" messages={messages}>
+      <IntlProvider
+        locale={currentLocale}
+        defaultLocale="en"
+        messages={messages}
+        onError={handleIntlError}
+      >
         <Suspense fallback={SuspenseLoader()}>
           <ConfigProvider>
             <ErrorBoundary>

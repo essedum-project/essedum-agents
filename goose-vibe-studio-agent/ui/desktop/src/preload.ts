@@ -10,7 +10,6 @@ const localStorageKeyMap: Partial<Record<SettingKey, string>> = {
   useSystemTheme: 'use_system_theme',
   responseStyle: 'response_style',
   showPricing: 'show_pricing',
-  sessionSharing: 'session_sharing_config',
   seenAnnouncementIds: 'seenAnnouncementIds',
 };
 
@@ -29,8 +28,6 @@ function parseLocalStorageValue<K extends SettingKey>(
         return rawValue as Settings[K];
       case 'showPricing':
         return (rawValue === 'true') as unknown as Settings[K];
-      case 'sessionSharing':
-        return JSON.parse(rawValue) as Settings[K];
       case 'seenAnnouncementIds':
         return JSON.parse(rawValue) as Settings[K];
       default:
@@ -112,21 +109,14 @@ type ElectronAPI = {
   showMessageBox: (options: MessageBoxOptions) => Promise<MessageBoxResponse>;
   showSaveDialog: (options: SaveDialogOptions) => Promise<SaveDialogResponse>;
   openInChrome: (url: string) => void;
-  fetchMetadata: (url: string) => Promise<string>;
   reloadApp: () => void;
   checkForOllama: () => Promise<boolean>;
-  checkMesh: () => Promise<{
-    running: boolean;
-    installed: boolean;
-    models: string[];
-    token?: string;
-    peerCount?: number;
-    nodeStatus?: string;
-    binaryPath?: string;
-  }>;
-  startMesh: (args: string[]) => Promise<{ started: boolean; error?: string; pid?: number }>;
-  stopMesh: () => Promise<{ stopped: boolean }>;
   selectFileOrDirectory: (defaultPath?: string) => Promise<string | null>;
+  selectImportSessionFile: () => Promise<{
+    filePath: string;
+    contents: string;
+    error?: string;
+  } | null>;
   getBinaryPath: (binaryName: string) => Promise<string>;
   readFile: (directory: string) => Promise<FileResponse>;
   writeFile: (directory: string, content: string) => Promise<boolean>;
@@ -142,11 +132,14 @@ type ElectronAPI = {
   setSetting: <K extends SettingKey>(key: K, value: Settings[K]) => Promise<void>;
   getSecretKey: () => Promise<string>;
   getGoosedHostPort: () => Promise<string | null>;
+  getAcpUrl: () => Promise<string | null>;
   setWakelock: (enable: boolean) => Promise<boolean>;
   getWakelockState: () => Promise<boolean>;
   setSpellcheck: (enable: boolean) => Promise<boolean>;
   getSpellcheckState: () => Promise<boolean>;
   openNotificationsSettings: () => Promise<boolean>;
+  isAnyWindowFocused: () => Promise<boolean>;
+  getIsFullScreen: () => Promise<boolean>;
   onMouseBackButtonClicked: (callback: () => void) => void;
   offMouseBackButtonClicked: (callback: () => void) => void;
   on: (
@@ -174,6 +167,7 @@ type ElectronAPI = {
   onUpdaterEvent: (callback: (event: UpdaterEvent) => void) => void;
   getUpdateState: () => Promise<{ updateAvailable: boolean; latestVersion?: string } | null>;
   isUsingGitHubFallback: () => Promise<boolean>;
+  getAutoDownloadDisabled: () => Promise<boolean>;
   // Recipe warning functions
   closeWindow: () => void;
   hasAcceptedRecipeBefore: (recipe: Recipe) => Promise<boolean>;
@@ -183,6 +177,8 @@ type ElectronAPI = {
   refreshApp: (app: GooseApp) => Promise<void>;
   closeApp: (appName: string) => Promise<void>;
   addRecentDir: (dir: string) => Promise<boolean>;
+  listRecentDirs: () => Promise<string[]>;
+  listGitWorktreeDirs: (dir: string) => Promise<string[]>;
 };
 
 type AppConfigAPI = {
@@ -211,15 +207,12 @@ const electronAPI: ElectronAPI = {
   showMessageBox: (options: MessageBoxOptions) => ipcRenderer.invoke('show-message-box', options),
   showSaveDialog: (options: SaveDialogOptions) => ipcRenderer.invoke('show-save-dialog', options),
   openInChrome: (url: string) => ipcRenderer.send('open-in-chrome', url),
-  fetchMetadata: (url: string) => ipcRenderer.invoke('fetch-metadata', url),
   reloadApp: () => ipcRenderer.send('reload-app'),
   checkForOllama: () => ipcRenderer.invoke('check-ollama'),
-  checkMesh: () => ipcRenderer.invoke('check-mesh'),
-  startMesh: (args: string[]) => ipcRenderer.invoke('start-mesh', args),
-  stopMesh: () => ipcRenderer.invoke('stop-mesh'),
 
   selectFileOrDirectory: (defaultPath?: string) =>
     ipcRenderer.invoke('select-file-or-directory', defaultPath),
+  selectImportSessionFile: () => ipcRenderer.invoke('select-import-session-file'),
   getBinaryPath: (binaryName: string) => ipcRenderer.invoke('get-binary-path', binaryName),
   readFile: (filePath: string) => ipcRenderer.invoke('read-file', filePath),
   writeFile: (filePath: string, content: string) =>
@@ -262,11 +255,14 @@ const electronAPI: ElectronAPI = {
   },
   getSecretKey: () => ipcRenderer.invoke('get-secret-key'),
   getGoosedHostPort: () => ipcRenderer.invoke('get-goosed-host-port'),
+  getAcpUrl: () => ipcRenderer.invoke('get-acp-url'),
   setWakelock: (enable: boolean) => ipcRenderer.invoke('set-wakelock', enable),
   getWakelockState: () => ipcRenderer.invoke('get-wakelock-state'),
   setSpellcheck: (enable: boolean) => ipcRenderer.invoke('set-spellcheck', enable),
   getSpellcheckState: () => ipcRenderer.invoke('get-spellcheck-state'),
   openNotificationsSettings: () => ipcRenderer.invoke('open-notifications-settings'),
+  isAnyWindowFocused: () => ipcRenderer.invoke('is-any-window-focused'),
+  getIsFullScreen: () => ipcRenderer.invoke('get-is-fullscreen'),
   onMouseBackButtonClicked: (callback: () => void) => {
     // Wrapper that ignores the event parameter.
     const wrappedCallback = (_event: Electron.IpcRendererEvent) => callback();
@@ -326,6 +322,9 @@ const electronAPI: ElectronAPI = {
   isUsingGitHubFallback: (): Promise<boolean> => {
     return ipcRenderer.invoke('is-using-github-fallback');
   },
+  getAutoDownloadDisabled: (): Promise<boolean> => {
+    return ipcRenderer.invoke('get-auto-download-disabled');
+  },
   closeWindow: () => ipcRenderer.send('close-window'),
   hasAcceptedRecipeBefore: (recipe: Recipe) =>
     ipcRenderer.invoke('has-accepted-recipe-before', recipe),
@@ -336,11 +335,21 @@ const electronAPI: ElectronAPI = {
   refreshApp: (app: GooseApp) => ipcRenderer.invoke('refresh-app', app),
   closeApp: (appName: string) => ipcRenderer.invoke('close-app', appName),
   addRecentDir: (dir: string) => ipcRenderer.invoke('add-recent-dir', dir),
+  listRecentDirs: () => ipcRenderer.invoke('list-recent-dirs'),
+  listGitWorktreeDirs: (dir: string) => ipcRenderer.invoke('list-git-worktree-dirs', dir),
 };
 
+function getAppLocale(): unknown {
+  try {
+    return ipcRenderer.sendSync('get-app-locale') ?? config.GOOSE_LOCALE;
+  } catch {
+    return config.GOOSE_LOCALE;
+  }
+}
+
 const appConfigAPI: AppConfigAPI = {
-  get: (key: string) => config[key],
-  getAll: () => config,
+  get: (key: string) => (key === 'GOOSE_LOCALE' ? getAppLocale() : config[key]),
+  getAll: () => ({ ...config, GOOSE_LOCALE: getAppLocale() }),
 };
 
 // Expose the APIs

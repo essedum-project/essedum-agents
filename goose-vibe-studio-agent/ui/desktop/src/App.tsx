@@ -8,10 +8,11 @@ import {
   useLocation,
   useSearchParams,
 } from 'react-router-dom';
-import { openSharedSessionFromDeepLink } from './sessionLinks';
-import { type SharedSessionDetails } from './sharedSessions';
+import { importNostrSessionFromDeepLink } from './sessionLinks';
 import { ErrorUI } from './components/ErrorBoundary';
 import { ExtensionInstallModal } from './components/ExtensionInstallModal';
+import RecipeParamsModalContainer from './components/RecipeParamsModalContainer';
+import { isRecipeParamsCancelled } from './acp/errors';
 import { toast, ToastContainer } from 'react-toastify';
 import AnnouncementModal from './components/AnnouncementModal';
 import TelemetryConsentPrompt from './components/TelemetryConsentPrompt';
@@ -25,10 +26,10 @@ import { UserInput } from './types/message';
 interface PairRouteState {
   resumeSessionId?: string;
   initialMessage?: UserInput;
+  noAutoSubmit?: boolean;
 }
 import SettingsView, { SettingsViewOptions } from './components/settings/SettingsView';
 import SessionsView from './components/sessions/SessionsView';
-import SharedSessionView from './components/sessions/SharedSessionView';
 import SchedulesView from './components/schedule/SchedulesView';
 import ProviderSettings from './components/settings/providers/ProviderSettingsPage';
 import { AppLayout } from './components/Layout/AppLayout';
@@ -44,6 +45,7 @@ import PermissionSettingsView from './components/settings/permission/PermissionS
 
 import ExtensionsView, { ExtensionsViewOptions } from './components/extensions/ExtensionsView';
 import RecipesView from './components/recipes/RecipesView';
+import SkillsView from './components/skills/SkillsView';
 import AppsView from './components/apps/AppsView';
 import StandaloneAppView from './components/apps/StandaloneAppView';
 import { View, ViewOptions } from './utils/navigationUtils';
@@ -67,35 +69,50 @@ const HubRouteWrapper = () => {
   return <Hub setView={setView} />;
 };
 
+export function resolveSessionInitialMessage(
+  session: { recipe?: { prompt?: string | null } | null },
+  initialMessage?: UserInput
+): UserInput | undefined {
+  return (
+    initialMessage ??
+    (session.recipe?.prompt ? { msg: session.recipe.prompt, images: [] } : undefined)
+  );
+}
+
 const PairRouteWrapper = ({
   activeSessions,
 }: {
   activeSessions: Array<{
     sessionId: string;
     initialMessage?: UserInput;
+    noAutoSubmit?: boolean;
   }>;
-  setActiveSessions: (sessions: Array<{ sessionId: string; initialMessage?: UserInput }>) => void;
+  setActiveSessions: (
+    sessions: Array<{ sessionId: string; initialMessage?: UserInput; noAutoSubmit?: boolean }>
+  ) => void;
 }) => {
   const { extensionsList } = useConfig();
   const location = useLocation();
   const routeState =
     (location.state as PairRouteState) || (window.history.state as PairRouteState) || {};
   const [searchParams, setSearchParams] = useSearchParams();
-  const [isCreatingSession, setIsCreatingSession] = useState(false);
+  const isCreatingSessionRef = useRef(false);
+  const navigate = useNavigate();
 
   const resumeSessionId = searchParams.get('resumeSessionId') ?? undefined;
   const recipeDeeplinkFromConfig = window.appConfig?.get('recipeDeeplink') as string | undefined;
   const recipeIdFromConfig = window.appConfig?.get('recipeId') as string | undefined;
   const initialMessage = routeState.initialMessage;
+  const noAutoSubmit = routeState.noAutoSubmit;
 
   // Create session if we have an initialMessage, recipeDeeplink, or recipeId but no sessionId
   useEffect(() => {
     if (
       (initialMessage || recipeDeeplinkFromConfig || recipeIdFromConfig) &&
       !resumeSessionId &&
-      !isCreatingSession
+      !isCreatingSessionRef.current
     ) {
-      setIsCreatingSession(true);
+      isCreatingSessionRef.current = true;
 
       (async () => {
         try {
@@ -104,12 +121,14 @@ const PairRouteWrapper = ({
             recipeId: recipeIdFromConfig,
             allExtensions: extensionsList,
           });
+          const sessionInitialMessage = resolveSessionInitialMessage(newSession, initialMessage);
 
           window.dispatchEvent(
             new CustomEvent(AppEvents.ADD_ACTIVE_SESSION, {
               detail: {
                 sessionId: newSession.id,
-                initialMessage,
+                initialMessage: sessionInitialMessage,
+                noAutoSubmit,
               },
             })
           );
@@ -119,6 +138,10 @@ const PairRouteWrapper = ({
             return prev;
           });
         } catch (error) {
+          if (isRecipeParamsCancelled(error)) {
+            navigate('/');
+            return;
+          }
           console.error('Failed to create session:', error);
           trackErrorWithContext(error, {
             component: 'PairRouteWrapper',
@@ -126,12 +149,10 @@ const PairRouteWrapper = ({
             recoverable: true,
           });
         } finally {
-          setIsCreatingSession(false);
+          isCreatingSessionRef.current = false;
         }
       })();
     }
-    // Note: isCreatingSession is intentionally NOT in the dependency array
-    // It's only used as a guard to prevent concurrent session creation
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     initialMessage,
@@ -150,16 +171,17 @@ const PairRouteWrapper = ({
           detail: {
             sessionId: resumeSessionId,
             initialMessage: initialMessage,
+            noAutoSubmit,
           },
         })
       );
     }
-  }, [resumeSessionId, activeSessions, initialMessage]);
+  }, [resumeSessionId, activeSessions, initialMessage, noAutoSubmit]);
 
   return null;
 };
 
-const SettingsRoute = ({ activeSessionId }: { activeSessionId?: string }) => {
+const SettingsRoute = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -175,13 +197,7 @@ const SettingsRoute = ({ activeSessionId }: { activeSessionId?: string }) => {
     viewOptions.section = sectionFromUrl;
   }
 
-  return (
-    <SettingsView
-      onClose={() => navigate('/')}
-      setView={setView}
-      viewOptions={{ ...viewOptions, sessionId: activeSessionId }}
-    />
-  );
+  return <SettingsView onClose={() => navigate('/')} setView={setView} viewOptions={viewOptions} />;
 };
 
 const SessionsRoute = () => {
@@ -195,6 +211,10 @@ const SchedulesRoute = () => {
 
 const RecipesRoute = () => {
   return <RecipesView />;
+};
+
+const SkillsRoute = () => {
+  return <SkillsView />;
 };
 
 const PermissionRoute = () => {
@@ -226,6 +246,9 @@ const PermissionRoute = () => {
           case 'recipes':
             navigate('/recipes');
             break;
+          case 'skills':
+            navigate('/skills');
+            break;
           default:
             navigate('/');
         }
@@ -244,47 +267,6 @@ const ConfigureProvidersRoute = () => {
         isOnboarding={false}
       />
     </div>
-  );
-};
-
-// Wrapper component for SharedSessionRoute to access parent state
-const SharedSessionRouteWrapper = ({
-  isLoadingSharedSession,
-  setIsLoadingSharedSession,
-  sharedSessionError,
-}: {
-  isLoadingSharedSession: boolean;
-  setIsLoadingSharedSession: (loading: boolean) => void;
-  sharedSessionError: string | null;
-}) => {
-  const location = useLocation();
-  const setView = useNavigation();
-
-  const historyState = window.history.state;
-  const sessionDetails = (location.state?.sessionDetails ||
-    historyState?.sessionDetails) as SharedSessionDetails | null;
-  const error = location.state?.error || historyState?.error || sharedSessionError;
-  const shareToken = location.state?.shareToken || historyState?.shareToken;
-  const baseUrl = location.state?.baseUrl || historyState?.baseUrl;
-
-  return (
-    <SharedSessionView
-      session={sessionDetails}
-      isLoading={isLoadingSharedSession}
-      error={error}
-      onRetry={async () => {
-        if (shareToken && baseUrl) {
-          setIsLoadingSharedSession(true);
-          try {
-            await openSharedSessionFromDeepLink(`goose://sessions/${shareToken}`, setView, baseUrl);
-          } catch (error) {
-            console.error('Failed to retry loading shared session:', error);
-          } finally {
-            setIsLoadingSharedSession(false);
-          }
-        }
-      }}
-    />
   );
 };
 
@@ -323,8 +305,6 @@ const ExtensionsRoute = () => {
 
 export function AppInner() {
   const [fatalError, setFatalError] = useState<string | null>(null);
-  const [isLoadingSharedSession, setIsLoadingSharedSession] = useState(false);
-  const [sharedSessionError, setSharedSessionError] = useState<string | null>(null);
 
   const navigate = useNavigate();
   const setView = useNavigation();
@@ -339,15 +319,16 @@ export function AppInner() {
   const MAX_ACTIVE_SESSIONS = 10;
 
   const [activeSessions, setActiveSessions] = useState<
-    Array<{ sessionId: string; initialMessage?: UserInput }>
+    Array<{ sessionId: string; initialMessage?: UserInput; noAutoSubmit?: boolean }>
   >([]);
 
   useEffect(() => {
     const handleAddActiveSession = (event: Event) => {
-      const { sessionId, initialMessage } = (
+      const { sessionId, initialMessage, noAutoSubmit } = (
         event as CustomEvent<{
           sessionId: string;
           initialMessage?: UserInput;
+          noAutoSubmit?: boolean;
         }>
       ).detail;
 
@@ -361,7 +342,7 @@ export function AppInner() {
         }
 
         // New session - add to end with LRU eviction if needed
-        const newSession = { sessionId, initialMessage };
+        const newSession = { sessionId, initialMessage, noAutoSubmit };
         const updated = [...prev, newSession];
         if (updated.length > MAX_ACTIVE_SESSIONS) {
           return updated.slice(updated.length - MAX_ACTIVE_SESSIONS);
@@ -383,11 +364,21 @@ export function AppInner() {
       });
     };
 
+    const handleSessionDeleted = (event: Event) => {
+      const { sessionId } = (event as CustomEvent<{ sessionId: string }>).detail;
+
+      setActiveSessions((prev) => {
+        return prev.filter((session) => session.sessionId !== sessionId);
+      });
+    };
+
     window.addEventListener(AppEvents.ADD_ACTIVE_SESSION, handleAddActiveSession);
     window.addEventListener(AppEvents.CLEAR_INITIAL_MESSAGE, handleClearInitialMessage);
+    window.addEventListener(AppEvents.SESSION_DELETED, handleSessionDeleted);
     return () => {
       window.removeEventListener(AppEvents.ADD_ACTIVE_SESSION, handleAddActiveSession);
       window.removeEventListener(AppEvents.CLEAR_INITIAL_MESSAGE, handleClearInitialMessage);
+      window.removeEventListener(AppEvents.SESSION_DELETED, handleSessionDeleted);
     };
   }, []);
 
@@ -403,37 +394,32 @@ export function AppInner() {
   }, []);
 
   useEffect(() => {
-    const handleOpenSharedSession = async (_event: IpcRendererEvent, ...args: unknown[]) => {
+    const handleOpenSessionShare = async (_event: IpcRendererEvent, ...args: unknown[]) => {
       const link = args[0] as string;
-      window.electron.logInfo(`Opening shared session from deep link ${link}`);
-      setIsLoadingSharedSession(true);
-      setSharedSessionError(null);
+      window.electron.logInfo('Opening session share link');
       try {
-        await openSharedSessionFromDeepLink(link, (_view: View, options?: ViewOptions) => {
-          navigate('/shared-session', { state: options });
-        });
+        if (link.startsWith('goose://sessions/nostr')) {
+          await importNostrSessionFromDeepLink(link);
+          navigate('/sessions');
+          return;
+        }
+
+        toast.error('Unsupported session share link');
+        navigate('/sessions');
       } catch (error) {
-        console.error('Unexpected error opening shared session:', error);
+        console.error('Unexpected error opening Nostr session share:', error);
         trackErrorWithContext(error, {
           component: 'AppInner',
-          action: 'open_shared_session',
+          action: 'open_nostr_session_share',
           recoverable: true,
         });
-        // Navigate to shared session view with error
-        const shareToken = link.replace('goose://sessions/', '');
-        const options = {
-          sessionDetails: null,
-          error: errorMessage(error, 'Unknown error'),
-          shareToken,
-        };
-        navigate('/shared-session', { state: options });
-      } finally {
-        setIsLoadingSharedSession(false);
+        toast.error(`Failed to import Nostr session: ${errorMessage(error, 'Unknown error')}`);
+        navigate('/sessions');
       }
     };
-    window.electron.on('open-shared-session', handleOpenSharedSession);
+    window.electron.on('open-shared-session', handleOpenSessionShare);
     return () => {
-      window.electron.off('open-shared-session', handleOpenSharedSession);
+      window.electron.off('open-shared-session', handleOpenSessionShare);
     };
   }, [navigate]);
 
@@ -453,18 +439,6 @@ export function AppInner() {
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, []);
-
-  // Show a toast if mesh is the configured provider but isn't running.
-  useEffect(() => {
-    const handler = () => {
-      toast.warn('Inference Mesh is set as your provider but isn\'t running. Open Settings → Mesh to start it. Keep goose running to stay connected.', {
-        autoClose: false,
-        toastId: 'mesh-not-running',
-      });
-    };
-    window.electron.on('mesh-not-running', handler);
-    return () => { window.electron.off('mesh-not-running', handler); };
   }, []);
 
   // Prevent default drag and drop behavior globally to avoid opening files in new windows
@@ -542,12 +516,12 @@ export function AppInner() {
 
   useEffect(() => {
     const handleNewChat = (_event: IpcRendererEvent, ..._args: unknown[]) => {
-      window.dispatchEvent(new CustomEvent(AppEvents.TRIGGER_NEW_CHAT));
+      navigate('/');
     };
 
     window.electron.on('new-chat', handleNewChat);
     return () => window.electron.off('new-chat', handleNewChat);
-  }, []);
+  }, [navigate]);
 
   useEffect(() => {
     const handleFocusInput = (_event: IpcRendererEvent, ..._args: unknown[]) => {
@@ -568,12 +542,14 @@ export function AppInner() {
   useEffect(() => {
     const handleSetInitialMessage = async (_event: IpcRendererEvent, ...args: unknown[]) => {
       const initialMessage = args[0] as string;
+      const options = (args[1] as { noAutoSubmit?: boolean } | undefined) || {};
 
       if (initialMessage && !isProcessingRef.current) {
         isProcessingRef.current = true;
         navigate('/pair', {
           state: {
             initialMessage: { msg: initialMessage, images: [] },
+            noAutoSubmit: options.noAutoSubmit,
           },
         });
         setTimeout(() => {
@@ -615,6 +591,7 @@ export function AppInner() {
         pauseOnHover
       />
       <ExtensionInstallModal addExtension={addExtension} setView={setView} />
+      <RecipeParamsModalContainer />
       <div className="relative w-screen h-screen overflow-hidden bg-background-secondary flex flex-col">
         <div className="titlebar-drag-region" />
         <div style={{ position: 'relative', width: '100%', height: '100%' }}>
@@ -642,14 +619,7 @@ export function AppInner() {
                   />
                 }
               />
-              <Route
-                path="settings"
-                element={
-                  <SettingsRoute
-                    activeSessionId={activeSessions[activeSessions.length - 1]?.sessionId}
-                  />
-                }
-              />
+              <Route path="settings" element={<SettingsRoute />} />
               <Route
                 path="extensions"
                 element={
@@ -662,16 +632,7 @@ export function AppInner() {
               <Route path="sessions" element={<SessionsRoute />} />
               <Route path="schedules" element={<SchedulesRoute />} />
               <Route path="recipes" element={<RecipesRoute />} />
-              <Route
-                path="shared-session"
-                element={
-                  <SharedSessionRouteWrapper
-                    isLoadingSharedSession={isLoadingSharedSession}
-                    setIsLoadingSharedSession={setIsLoadingSharedSession}
-                    sharedSessionError={sharedSessionError}
-                  />
-                }
-              />
+              <Route path="skills" element={<SkillsRoute />} />
               <Route path="permission" element={<PermissionRoute />} />
             </Route>
           </Routes>

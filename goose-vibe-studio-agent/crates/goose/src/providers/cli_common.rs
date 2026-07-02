@@ -1,9 +1,9 @@
 use serde_json::Value;
 
-use super::base::{ProviderUsage, Usage};
-use super::errors::ProviderError;
 use crate::conversation::message::{Message, MessageContent};
 use crate::utils::safe_truncate;
+use goose_providers::conversation::token_usage::{ProviderUsage, Usage};
+use goose_providers::errors::ProviderError;
 use rmcp::model::Role;
 
 pub(crate) fn extract_usage_tokens(usage_info: &Value) -> Usage {
@@ -13,10 +13,12 @@ pub(crate) fn extract_usage_tokens(usage_info: &Value) -> Usage {
             .and_then(|v| v.as_i64())
             .and_then(|v| i32::try_from(v).ok())
     };
-    Usage::new(
+    Usage::from_cache_exclusive_input(
         get("input_tokens"),
         get("output_tokens"),
         get("total_tokens"),
+        get("cache_read_input_tokens"),
+        get("cache_creation_input_tokens"),
     )
 }
 
@@ -56,7 +58,11 @@ pub(crate) fn generate_simple_session_description(
         })
         .map(|text| {
             // Strip the wrapper added by generate_session_name so we get
-            // the actual user content.
+            // the actual user content. First strip the optional background context section.
+            let text = text
+                .rfind(SESSION_NAME_BEGIN_MARKER)
+                .and_then(|idx| text.get(idx..))
+                .unwrap_or(text);
             let stripped = text
                 .strip_prefix(SESSION_NAME_BEGIN_MARKER)
                 .unwrap_or(text)

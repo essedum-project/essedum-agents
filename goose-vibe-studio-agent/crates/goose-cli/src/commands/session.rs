@@ -3,7 +3,13 @@ use anyhow::{Context, Result};
 
 use cliclack::{confirm, multiselect, select};
 use etcetera::home_dir;
-use goose::session::{generate_diagnostics, Session, SessionManager};
+#[cfg(feature = "nostr")]
+use goose::config::Config;
+#[cfg(feature = "nostr")]
+use goose::session::nostr_share;
+use goose::session::{
+    generate_diagnostics, DiagnosticsLevel, Session, SessionManager, SessionType,
+};
 use goose::utils::safe_truncate;
 use regex::Regex;
 use std::fs;
@@ -64,7 +70,8 @@ fn prompt_interactive_session_removal(sessions: &[Session]) -> Result<Vec<Sessio
                 &s.name
             };
             let truncated_desc = safe_truncate(desc, TRUNCATED_DESC_LENGTH);
-            let display_text = format!("{} - {} ({})", s.updated_at, truncated_desc, s.id);
+            let display_text =
+                format!("{} - {} ({})", session_activity_at(s), truncated_desc, s.id);
             (display_text, s.clone())
         })
         .collect();
@@ -144,6 +151,10 @@ fn write_line_or_broken_pipe_ok<W: Write>(out: &mut W, line: &str) -> Result<boo
     }
 }
 
+fn session_activity_at(session: &Session) -> chrono::DateTime<chrono::Utc> {
+    session.last_message_at.unwrap_or(session.updated_at)
+}
+
 pub async fn handle_session_list(
     format: String,
     ascending: bool,
@@ -164,9 +175,9 @@ pub async fn handle_session_list(
     }
 
     if ascending {
-        sessions.sort_by(|a, b| a.updated_at.cmp(&b.updated_at));
+        sessions.sort_by_key(session_activity_at);
     } else {
-        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        sessions.sort_by_key(|b| std::cmp::Reverse(session_activity_at(b)));
     }
 
     if let Some(n) = limit {
@@ -200,7 +211,7 @@ pub async fn handle_session_list(
                     "{} - {} - {} - {}",
                     session.id,
                     session.name,
-                    session.updated_at,
+                    session_activity_at(&session),
                     display_path_with_tilde(&session.working_dir)
                 );
                 if !write_line_or_broken_pipe_ok(&mut out, &output)? {
@@ -216,6 +227,8 @@ pub async fn handle_session_export(
     session_id: String,
     output_path: Option<PathBuf>,
     format: String,
+    nostr: bool,
+    #[cfg_attr(not(feature = "nostr"), allow(unused_variables))] relays: Vec<String>,
 ) -> Result<()> {
     let session_manager = SessionManager::instance();
     let session = match session_manager.get_session(&session_id, true).await {
@@ -241,6 +254,34 @@ pub async fn handle_session_export(
         _ => return Err(anyhow::anyhow!("Unsupported format: {}", format)),
     };
 
+    #[cfg(feature = "nostr")]
+    if nostr {
+        if format != "json" {
+            return Err(anyhow::anyhow!(
+                "Nostr session sharing only supports --format json"
+            ));
+        }
+        if output_path.is_some() {
+            return Err(anyhow::anyhow!(
+                "Nostr session sharing cannot be combined with --output"
+            ));
+        }
+
+        let relays = nostr_share::resolve_relays(relays, Config::global());
+        let share = nostr_share::publish_session_json(&output, relays).await?;
+        println!("Session published to Nostr relays:");
+        for relay in &share.relays {
+            println!("- {}", relay);
+        }
+        println!("\nShare link:");
+        println!("{}", share.deeplink);
+        return Ok(());
+    }
+    #[cfg(not(feature = "nostr"))]
+    if nostr {
+        return Err(anyhow::anyhow!("goose was not built with nostr support"));
+    }
+
     if let Some(output_path) = output_path {
         fs::write(&output_path, output).with_context(|| {
             format!("Failed to write to output file: {}", output_path.display())
@@ -253,26 +294,62 @@ pub async fn handle_session_export(
     Ok(())
 }
 
+pub async fn handle_session_import(input: String, nostr: bool) -> Result<()> {
+    let json = if nostr || input.starts_with("goose://sessions/nostr") {
+        #[cfg(feature = "nostr")]
+        {
+            nostr_share::import_session_json_from_deeplink(&input).await?
+        }
+        #[cfg(not(feature = "nostr"))]
+        return Err(anyhow::anyhow!("goose was not built with nostr support"));
+    } else {
+        fs::read_to_string(&input)
+            .with_context(|| format!("Failed to read session import file: {input}"))?
+    };
+
+    let format = goose::session::import_formats::detect_format(&json);
+    let label = match format {
+        goose::session::import_formats::ImportFormat::Goose => "goose",
+        goose::session::import_formats::ImportFormat::ClaudeCode => "Claude Code",
+        goose::session::import_formats::ImportFormat::Codex => "Codex",
+        goose::session::import_formats::ImportFormat::Pi => "Pi",
+    };
+    println!("Detected format: {}", label);
+
+    let session_manager = SessionManager::instance();
+    let session = session_manager
+        .import_session(&json, Some(SessionType::User))
+        .await?;
+
+    println!("Session imported:");
+    println!("{} - {}", session.id, session.name);
+
+    Ok(())
+}
+
 pub async fn handle_diagnostics(session_id: &str, output_path: Option<PathBuf>) -> Result<()> {
     println!(
-        "Generating diagnostics bundle for session '{}'...",
+        "Generating diagnostics report for session '{}'...",
         session_id
     );
 
     let session_manager = SessionManager::instance();
-    let diagnostics_data = generate_diagnostics(&session_manager, session_id)
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to write to generate diagnostics bundle for session '{}'",
-                session_id
-            )
-        })?;
+    let diagnostics_report =
+        generate_diagnostics(&session_manager, session_id, DiagnosticsLevel::Full)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to generate diagnostics report for session '{}'",
+                    session_id
+                )
+            })?;
+    let diagnostics_data = serde_json::to_vec_pretty(&diagnostics_report)
+        .context("Failed to serialize diagnostics report")?;
 
     let output_file = if let Some(path) = output_path {
         path.clone()
     } else {
-        PathBuf::from(format!("diagnostics_{}.zip", session_id))
+        PathBuf::from(format!("diagnostics_{}.json", session_id))
     };
 
     let mut file = fs::File::create(&output_file).context(format!(
@@ -283,7 +360,7 @@ pub async fn handle_diagnostics(session_id: &str, output_path: Option<PathBuf>) 
     file.write_all(&diagnostics_data)
         .context("Failed to write diagnostics data")?;
 
-    println!("Diagnostics bundle saved to: {}", output_file.display());
+    println!("Diagnostics report saved to: {}", output_file.display());
 
     Ok(())
 }

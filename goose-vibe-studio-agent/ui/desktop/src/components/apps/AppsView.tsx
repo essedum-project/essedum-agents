@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { MainPanelLayout } from '../Layout/MainPanelLayout';
 import { Button } from '../ui/button';
-import { Download, ExternalLink, Play, Upload } from 'lucide-react';
-import { exportApp, GooseApp, importApp, listApps, previewSession } from '../../api';
+import { Download, Play, Upload } from 'lucide-react';
+import type { GooseApp } from '../../api';
+import { exportMcpApp, importMcpApp, listMcpApps } from '../../acp/mcp-apps';
 import { useChatContext } from '../../contexts/ChatContext';
 import { formatAppName } from '../../utils/conversionUtils';
 import { errorMessage } from '../../utils/conversionUtils';
@@ -28,7 +29,7 @@ const i18n = defineMessages({
   description: {
     id: 'appsView.description',
     defaultMessage:
-      'Applications from your MCP servers and Apps build by goose itself. You can ask it to create new apps through the chat interface and they will appear here.',
+      'Applications from your MCP servers and Apps built by goose itself. You can ask it to create new apps through the chat interface and they will appear here.',
   },
   loading: {
     id: 'appsView.loading',
@@ -51,18 +52,6 @@ const i18n = defineMessages({
     id: 'appsView.launch',
     defaultMessage: 'Launch',
   },
-  preview: {
-    id: 'appsView.preview',
-    defaultMessage: 'Preview',
-  },
-  previewTitle: {
-    id: 'appsView.previewTitle',
-    defaultMessage: 'App Preview',
-  },
-  previewBuilding: {
-    id: 'appsView.previewBuilding',
-    defaultMessage: 'Building & deploying…',
-  },
 });
 
 const GridLayout = ({ children }: { children: React.ReactNode }) => {
@@ -84,8 +73,6 @@ export default function AppsView() {
   const [apps, setApps] = useState<GooseApp[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [previewLoading, setPreviewLoading] = useState(false);
   const chatContext = useChatContext();
   const sessionId = chatContext?.chat.sessionId;
 
@@ -93,10 +80,7 @@ export default function AppsView() {
   useEffect(() => {
     const loadCachedApps = async () => {
       try {
-        const response = await listApps({
-          throwOnError: true,
-        });
-        const cachedApps = response.data?.apps || [];
+        const cachedApps = await listMcpApps();
         // Only show apps from the "apps" extension (vibe coded apps built by Goose)
         setApps(cachedApps.filter((a) => a.mcpServers?.includes('apps')));
       } catch (err) {
@@ -115,11 +99,7 @@ export default function AppsView() {
 
     const refreshApps = async () => {
       try {
-        const response = await listApps({
-          throwOnError: true,
-          query: { session_id: sessionId },
-        });
-        const freshApps = response.data?.apps || [];
+        const freshApps = await listMcpApps(sessionId);
         // Only show apps from the "apps" extension (vibe coded apps built by Goose)
         setApps(freshApps.filter((a) => a.mcpServers?.includes('apps')));
         setError(null);
@@ -148,13 +128,8 @@ export default function AppsView() {
 
         // Refresh apps list to get latest state
         if (eventSessionId) {
-          listApps({
-            throwOnError: false,
-            query: { session_id: eventSessionId },
-          }).then((response) => {
-            if (response.data?.apps) {
-              setApps(response.data.apps.filter((a) => a.mcpServers?.includes('apps')));
-            }
+          listMcpApps(eventSessionId).then((apps) => {
+            setApps(apps.filter((a) => a.mcpServers?.includes('apps')));
           });
         }
       }
@@ -169,11 +144,7 @@ export default function AppsView() {
 
     try {
       setLoading(true);
-      const response = await listApps({
-        throwOnError: true,
-        query: { session_id: sessionId },
-      });
-      const fetchedApps = response.data?.apps || [];
+      const fetchedApps = await listMcpApps(sessionId);
       // Only show apps from the "apps" extension (vibe coded apps built by Goose)
       setApps(fetchedApps.filter((a) => a.mcpServers?.includes('apps')));
       setError(null);
@@ -196,47 +167,18 @@ export default function AppsView() {
     }
   };
 
-  const handlePreviewApp = async () => {
-    if (!sessionId) return;
-    setPreviewLoading(true);
-    setPreviewUrl(null);
-    try {
-      const response = await previewSession({
-        path: { session_id: sessionId },
-        throwOnError: true,
-      });
-      const url = (response.data as { deployUrl?: string; deploy_url?: string })?.deployUrl
-        ?? (response.data as { deployUrl?: string; deploy_url?: string })?.deploy_url;
-      if (url) {
-        setPreviewUrl(url);
-      } else {
-        setError('Preview returned no URL');
-      }
-    } catch (err) {
-      setError(errorMessage(err, 'Preview failed'));
-    } finally {
-      setPreviewLoading(false);
-    }
-  };
-
   const handleDownloadApp = async (app: GooseApp) => {
     try {
-      const response = await exportApp({
-        throwOnError: true,
-        path: { name: app.name },
-      });
-
-      if (response.data) {
-        const blob = new Blob([response.data as string], { type: 'text/html' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${app.name}.html`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-      }
+      const html = await exportMcpApp(app.name);
+      const blob = new Blob([html], { type: 'text/html' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${app.name}.html`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
     } catch (err) {
       console.error('Failed to export app:', err);
       setError(errorMessage(err, 'Failed to export app'));
@@ -255,15 +197,9 @@ export default function AppsView() {
 
     try {
       const text = await file.text();
-      await importApp({
-        throwOnError: true,
-        body: { html: text },
-      });
+      await importMcpApp(text);
 
-      const response = await listApps({
-        throwOnError: true,
-      });
-      const cachedApps = response.data?.apps || [];
+      const cachedApps = await listMcpApps();
       // Only show apps from the "apps" extension (vibe coded apps built by Goose)
       setApps(cachedApps.filter((a) => a.mcpServers?.includes('apps')));
       setError(null);
@@ -300,31 +236,15 @@ export default function AppsView() {
           <div className="flex flex-col page-transition">
             <div className="flex justify-between items-center mb-1">
               <h1 className="text-4xl font-light">{intl.formatMessage(i18n.title)}</h1>
-              <div className="flex gap-2">
-                {sessionId && (
-                  <Button
-                    variant="default"
-                    size="sm"
-                    onClick={handlePreviewApp}
-                    disabled={previewLoading}
-                    className="flex items-center gap-2"
-                  >
-                    <ExternalLink className="h-4 w-4" />
-                    {previewLoading
-                      ? intl.formatMessage(i18n.previewBuilding)
-                      : intl.formatMessage(i18n.preview)}
-                  </Button>
-                )}
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleImportClick}
-                  className="flex items-center gap-2"
-                >
-                  <Upload className="h-4 w-4" />
-                  {intl.formatMessage(i18n.importApp)}
-                </Button>
-              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleImportClick}
+                className="flex items-center gap-2"
+              >
+                <Upload className="h-4 w-4" />
+                {intl.formatMessage(i18n.importApp)}
+              </Button>
             </div>
             <div className="mb-4">
               <p className="text-sm text-text-secondary mb-2">
@@ -366,7 +286,9 @@ export default function AppsView() {
                       )}
                       {app.mcpServers && app.mcpServers.length > 0 && (
                         <span className="inline-block px-2 py-1 text-xs bg-background-secondary text-text-secondary rounded">
-                          {isCustomApp ? intl.formatMessage(i18n.customApp) : app.mcpServers.join(', ')}
+                          {isCustomApp
+                            ? intl.formatMessage(i18n.customApp)
+                            : app.mcpServers.join(', ')}
                         </span>
                       )}
                     </div>
@@ -398,32 +320,6 @@ export default function AppsView() {
           )}
         </div>
       </div>
-      {previewUrl && (
-        <div className="fixed inset-0 z-50 flex flex-col bg-background-primary">
-          <div className="flex items-center justify-between px-4 py-2 border-b bg-background-secondary">
-            <span className="text-sm font-medium">{intl.formatMessage(i18n.previewTitle)}</span>
-            <div className="flex items-center gap-3">
-              <a
-                href={previewUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-xs text-text-secondary underline truncate max-w-xs"
-              >
-                {previewUrl}
-              </a>
-              <Button variant="ghost" size="sm" onClick={() => setPreviewUrl(null)}>
-                ✕
-              </Button>
-            </div>
-          </div>
-          <iframe
-            src={previewUrl}
-            className="flex-1 w-full border-0"
-            title={intl.formatMessage(i18n.previewTitle)}
-            sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-          />
-        </div>
-      )}
     </MainPanelLayout>
   );
 }

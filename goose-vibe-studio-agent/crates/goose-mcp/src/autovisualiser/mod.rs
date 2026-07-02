@@ -116,6 +116,25 @@ fn validation_err(msg: impl Into<String>) -> ErrorData {
     ErrorData::new(ErrorCode::INVALID_PARAMS, msg.into(), None)
 }
 
+/// Accepts `data` either as a JSON value or as a JSON-encoded string,
+/// since models sometimes emit complex tool parameters double-encoded.
+fn lenient_data<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = Value::deserialize(deserializer)?;
+    let value = match value {
+        Value::String(s) => serde_json::from_str(&s).map_err(|e| {
+            serde::de::Error::custom(format!(
+                "the 'data' parameter was a JSON-encoded string that could not be parsed as JSON ({e}); provide 'data' as a JSON object, not a string"
+            ))
+        })?,
+        other => other,
+    };
+    T::deserialize(value).map_err(serde::de::Error::custom)
+}
+
 /// Sankey node structure
 #[derive(Debug, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct SankeyNode {
@@ -184,6 +203,7 @@ impl SankeyData {
 #[derive(Debug, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct RenderSankeyParams {
     /// The data for the Sankey diagram
+    #[serde(deserialize_with = "lenient_data")]
     pub data: SankeyData,
 }
 
@@ -232,6 +252,7 @@ impl RadarData {
 #[derive(Debug, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct RenderRadarParams {
     /// The data for the radar chart
+    #[serde(deserialize_with = "lenient_data")]
     pub data: RadarData,
 }
 
@@ -277,16 +298,6 @@ pub struct SingleDonutChart {
     pub labels: Option<Vec<String>>,
 }
 
-/// Donut chart data — a single chart object or an array of chart objects
-#[derive(Debug, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
-#[serde(untagged)]
-pub enum DonutChartData {
-    /// Single donut chart
-    Single(SingleDonutChart),
-    /// Multiple donut charts
-    Multiple(Vec<SingleDonutChart>),
-}
-
 impl SingleDonutChart {
     fn validate(&self) -> Result<(), ErrorData> {
         if self.values.is_empty() {
@@ -305,28 +316,22 @@ impl SingleDonutChart {
     }
 }
 
-impl DonutChartData {
-    fn validate(&self) -> Result<(), ErrorData> {
-        match self {
-            DonutChartData::Single(chart) => chart.validate(),
-            DonutChartData::Multiple(charts) => {
-                if charts.is_empty() {
-                    return Err(validation_err("charts array must not be empty"));
-                }
-                for chart in charts {
-                    chart.validate()?;
-                }
-                Ok(())
-            }
-        }
+fn validate_donut_charts(charts: &[SingleDonutChart]) -> Result<(), ErrorData> {
+    if charts.is_empty() {
+        return Err(validation_err("charts array must not be empty"));
     }
+    for chart in charts {
+        chart.validate()?;
+    }
+    Ok(())
 }
 
 /// Parameters for render_donut tool
 #[derive(Debug, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct RenderDonutParams {
-    /// The chart data (single chart object or array of chart objects)
-    pub data: DonutChartData,
+    /// The chart data as an array of chart objects. Use a single-element array for one chart.
+    #[serde(deserialize_with = "lenient_data")]
+    pub data: Vec<SingleDonutChart>,
 }
 
 /// Treemap node structure
@@ -367,6 +372,7 @@ impl TreemapNode {
 #[derive(Debug, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct RenderTreemapParams {
     /// The hierarchical data for the treemap
+    #[serde(deserialize_with = "lenient_data")]
     pub data: TreemapNode,
 }
 
@@ -410,6 +416,7 @@ impl ChordData {
 #[derive(Debug, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct RenderChordParams {
     /// The data for the chord diagram
+    #[serde(deserialize_with = "lenient_data")]
     pub data: ChordData,
 }
 
@@ -510,6 +517,7 @@ impl MapData {
 #[derive(Debug, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct RenderMapParams {
     /// The data for the map visualization
+    #[serde(deserialize_with = "lenient_data")]
     pub data: MapData,
 }
 
@@ -625,6 +633,7 @@ impl ChartData {
 #[derive(Debug, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct ShowChartParams {
     /// The data for the chart
+    #[serde(deserialize_with = "lenient_data")]
     pub data: ChartData,
 }
 
@@ -987,7 +996,8 @@ Example:
     #[tool(
         name = "render_donut",
         description = r#"show pie or donut charts for categorical data visualization.
-Supports single or multiple charts in a grid layout.
+Supports one or more charts in a grid layout.
+The `data` field must always be an array; pass a single-element array for one chart.
 
 Each chart object must contain:
 - values: Array of numbers OR objects with 'label' and 'value'
@@ -996,20 +1006,24 @@ Each chart object must contain:
 - labels: Optional array of labels (required when values are plain numbers)
 
 Example single chart (labeled values):
-{
-  "values": [
-    {"label": "Marketing", "value": 25000},
-    {"label": "Development", "value": 35000}
-  ],
-  "title": "Budget"
-}
+[
+  {
+    "values": [
+      {"label": "Marketing", "value": 25000},
+      {"label": "Development", "value": 35000}
+    ],
+    "title": "Budget"
+  }
+]
 
 Example single chart (parallel arrays):
-{
-  "values": [45000, 38000],
-  "labels": ["Product A", "Product B"],
-  "type": "pie"
-}
+[
+  {
+    "values": [45000, 38000],
+    "labels": ["Product A", "Product B"],
+    "type": "pie"
+  }
+]
 
 Example multiple charts (array of chart objects):
 [
@@ -1023,7 +1037,7 @@ Example multiple charts (array of chart objects):
         params: Parameters<RenderDonutParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let inner = params.0;
-        inner.data.validate()?;
+        validate_donut_charts(&inner.data)?;
         let data = validate_data_param(
             &serde_json::to_value(inner).map_err(|e| {
                 ErrorData::new(
@@ -1035,15 +1049,21 @@ Example multiple charts (array of chart objects):
             true,
         )?;
 
-        let text_fallback = if data.is_array() {
-            let count = data.as_array().map(|a| a.len()).unwrap_or(0);
-            format!("donut/pie chart: {} chart(s)", count)
-        } else {
-            let title = data
+        let charts = data.as_array().ok_or_else(|| {
+            ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                "The 'data' parameter must be an array.".to_string(),
+                None,
+            )
+        })?;
+        let text_fallback = if charts.len() == 1 {
+            let title = charts[0]
                 .get("title")
                 .and_then(|v| v.as_str())
                 .unwrap_or("Untitled");
             format!("donut/pie chart: \"{}\"", title)
+        } else {
+            format!("donut/pie chart: {} chart(s)", charts.len())
         };
 
         let mut result = CallToolResult::structured(data);
@@ -1566,7 +1586,7 @@ mod tests {
     async fn test_render_donut() {
         let router = AutoVisualiserRouter::new();
         let params = Parameters(RenderDonutParams {
-            data: DonutChartData::Single(SingleDonutChart {
+            data: vec![SingleDonutChart {
                 values: vec![
                     DonutDataItem::Number(30.0),
                     DonutDataItem::Number(40.0),
@@ -1575,7 +1595,7 @@ mod tests {
                 labels: Some(vec!["A".to_string(), "B".to_string(), "C".to_string()]),
                 title: None,
                 chart_type: None,
-            }),
+            }],
         });
 
         let result = router.render_donut(params).await;
@@ -1721,14 +1741,14 @@ mod donut_format_tests {
 
     #[test]
     fn labeled_values_single_chart() {
-        // {"data": {"values": [{"label": "A", "value": 10}, ...]}}
+        // {"data": [{"values": [{"label": "A", "value": 10}, ...]}]}
         let input = json!({
-            "data": {
+            "data": [{
                 "values": [
                     {"label": "A", "value": 10},
                     {"label": "B", "value": 20}
                 ]
-            }
+            }]
         });
         let result = round_trip(input);
         assert!(
@@ -1740,12 +1760,12 @@ mod donut_format_tests {
 
     #[test]
     fn parallel_arrays_single_chart() {
-        // {"data": {"values": [10, 20], "labels": ["A", "B"]}}
+        // {"data": [{"values": [10, 20], "labels": ["A", "B"]}]}
         let input = json!({
-            "data": {
+            "data": [{
                 "values": [10, 20],
                 "labels": ["A", "B"]
-            }
+            }]
         });
         let result = round_trip(input);
         assert!(
@@ -1775,14 +1795,14 @@ mod donut_format_tests {
     #[test]
     fn labeled_values_with_title_and_type() {
         let input = json!({
-            "data": {
+            "data": [{
                 "values": [
                     {"label": "Marketing", "value": 25000},
                     {"label": "Development", "value": 35000}
                 ],
                 "title": "Budget",
                 "type": "pie"
-            }
+            }]
         });
         let result = round_trip(input);
         assert!(
@@ -1910,31 +1930,31 @@ mod validation_tests {
 
     #[test]
     fn donut_rejects_empty_values() {
-        let data = DonutChartData::Single(SingleDonutChart {
+        let data = vec![SingleDonutChart {
             values: vec![],
             title: None,
             chart_type: None,
             labels: None,
-        });
-        assert!(data.validate().is_err());
+        }];
+        assert!(validate_donut_charts(&data).is_err());
     }
 
     #[test]
     fn donut_rejects_mismatched_labels() {
-        let data = DonutChartData::Single(SingleDonutChart {
+        let data = vec![SingleDonutChart {
             values: vec![DonutDataItem::Number(10.0), DonutDataItem::Number(20.0)],
             title: None,
             chart_type: None,
             labels: Some(vec!["A".into()]), // 1 label but 2 values
-        });
-        let err = data.validate().unwrap_err();
+        }];
+        let err = validate_donut_charts(&data).unwrap_err();
         assert!(err.message.contains("labels"));
     }
 
     #[test]
     fn donut_rejects_empty_multiple() {
-        let data = DonutChartData::Multiple(vec![]);
-        assert!(data.validate().is_err());
+        let data: Vec<SingleDonutChart> = vec![];
+        assert!(validate_donut_charts(&data).is_err());
     }
 
     #[test]
@@ -2089,5 +2109,104 @@ mod validation_tests {
         };
         let err = data.validate().unwrap_err();
         assert!(err.message.contains("longitude"));
+    }
+}
+
+#[cfg(test)]
+mod lenient_data_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn show_chart_accepts_string_encoded_data() {
+        let input = json!({
+            "data": "{\"type\": \"bar\", \"labels\": [\"A\", \"B\"], \"datasets\": [{\"label\": \"S\", \"data\": [1, 2]}]}"
+        });
+        let parsed: ShowChartParams = serde_json::from_value(input).unwrap();
+        assert_eq!(parsed.data.datasets.len(), 1);
+    }
+
+    #[test]
+    fn show_chart_still_accepts_object_data() {
+        let input = json!({
+            "data": {"type": "bar", "labels": ["A", "B"], "datasets": [{"label": "S", "data": [1, 2]}]}
+        });
+        let parsed: ShowChartParams = serde_json::from_value(input).unwrap();
+        assert_eq!(parsed.data.datasets.len(), 1);
+    }
+
+    #[test]
+    fn donut_accepts_string_encoded_array_data() {
+        let input = json!({
+            "data": "[{\"values\": [10, 20], \"labels\": [\"A\", \"B\"]}]"
+        });
+        let parsed: RenderDonutParams = serde_json::from_value(input).unwrap();
+        assert_eq!(parsed.data.len(), 1);
+    }
+
+    #[test]
+    fn sankey_accepts_string_encoded_data() {
+        let input = json!({
+            "data": "{\"nodes\": [{\"name\": \"A\"}, {\"name\": \"B\"}], \"links\": [{\"source\": \"A\", \"target\": \"B\", \"value\": 1.0}]}"
+        });
+        let parsed: RenderSankeyParams = serde_json::from_value(input).unwrap();
+        assert_eq!(parsed.data.nodes.len(), 2);
+    }
+
+    #[test]
+    fn radar_accepts_string_encoded_data() {
+        let input = json!({
+            "data": "{\"labels\": [\"X\", \"Y\"], \"datasets\": [{\"label\": \"S\", \"data\": [1.0, 2.0]}]}"
+        });
+        let parsed: RenderRadarParams = serde_json::from_value(input).unwrap();
+        assert_eq!(parsed.data.labels.len(), 2);
+    }
+
+    #[test]
+    fn treemap_accepts_string_encoded_data() {
+        let input = json!({
+            "data": "{\"name\": \"root\", \"children\": [{\"name\": \"leaf\", \"value\": 5.0}]}"
+        });
+        let parsed: RenderTreemapParams = serde_json::from_value(input).unwrap();
+        assert_eq!(parsed.data.name, "root");
+    }
+
+    #[test]
+    fn chord_accepts_string_encoded_data() {
+        let input = json!({
+            "data": "{\"labels\": [\"A\", \"B\"], \"matrix\": [[0.0, 1.0], [1.0, 0.0]]}"
+        });
+        let parsed: RenderChordParams = serde_json::from_value(input).unwrap();
+        assert_eq!(parsed.data.matrix.len(), 2);
+    }
+
+    #[test]
+    fn map_accepts_string_encoded_data() {
+        let input = json!({
+            "data": "{\"markers\": [{\"lat\": 1.0, \"lng\": 2.0}]}"
+        });
+        let parsed: RenderMapParams = serde_json::from_value(input).unwrap();
+        assert_eq!(parsed.data.markers.len(), 1);
+    }
+
+    #[test]
+    fn invalid_json_string_gives_clear_error() {
+        let input = json!({"data": "not valid json"});
+        let err = serde_json::from_value::<ShowChartParams>(input).unwrap_err();
+        assert!(err.to_string().contains("could not be parsed as JSON"));
+    }
+
+    #[test]
+    fn string_encoded_data_with_wrong_shape_reports_field_error() {
+        let input = json!({"data": "{\"nope\": 1}"});
+        let err = serde_json::from_value::<ShowChartParams>(input).unwrap_err();
+        assert!(err.to_string().contains("type"));
+    }
+
+    #[test]
+    fn schema_still_reflects_struct_type() {
+        let schema = serde_json::to_value(rmcp::schemars::schema_for!(ShowChartParams)).unwrap();
+        let data_schema = &schema["properties"]["data"];
+        assert_ne!(data_schema["type"], json!("string"));
     }
 }

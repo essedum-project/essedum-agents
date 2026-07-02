@@ -1,38 +1,46 @@
-use agent_client_protocol_schema::AGENT_METHOD_NAMES;
-use anyhow::{Context, Result};
-use async_stream::try_stream;
-use futures::future::BoxFuture;
-use rmcp::model::{Role, Tool};
-use sacp::schema::{
+use agent_client_protocol::schema::v1::{
     ClientCapabilities, CloseSessionRequest, ContentBlock, ContentChunk, EnvVariable, HttpHeader,
     ImageContent, InitializeRequest, InitializeResponse, McpCapabilities, McpServer, McpServerHttp,
     McpServerStdio, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
-    ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
     SessionConfigSelectOptions, SessionId, SessionNotification, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionModeRequest, SetSessionModeResponse, StopReason,
-    TextContent, ToolCallContent,
+    TextContent, ToolCallContent, ToolCallStatus, ToolKind,
 };
-use sacp::{Agent, Client, ConnectionTo};
+use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::{Agent, Client, ConnectionTo};
+use agent_client_protocol_schema::v1::Usage as AcpUsage;
+use agent_client_protocol_schema::v1::AGENT_METHOD_NAMES;
+use anyhow::{Context, Result};
+use async_stream::try_stream;
+use futures::future::BoxFuture;
+use goose_providers::conversation::token_usage::{ProviderUsage, Usage};
+use rmcp::model::{CallToolRequestParams, CallToolResult, Content as RmcpContent, Role, Tool};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, Mutex,
+};
 use std::thread::JoinHandle;
+use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex};
 use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
 
 use crate::acp::{map_permission_response, PermissionDecision};
 use crate::config::{ExtensionConfig, GooseMode};
-use crate::conversation::message::{Message, MessageContent};
-use crate::model::ModelConfig;
+use crate::context_mgmt::format_message_for_compacting;
+use crate::conversation::message::{Message, MessageContent, TOOL_META_EXTERNAL_DISPATCH_KEY};
 use crate::permission::permission_confirmation::PrincipalType;
 use crate::permission::{Permission, PermissionConfirmation};
 use crate::providers::base::{MessageStream, PermissionRouting, Provider};
-use crate::providers::errors::ProviderError;
 use crate::subprocess::configure_subprocess;
+use goose_providers::errors::ProviderError;
+use goose_providers::model::ModelConfig;
 
 /// Sentinel: resolved to the actual model name during connect().
 pub const ACP_CURRENT_MODEL: &str = "current";
@@ -45,6 +53,11 @@ pub struct AcpProviderConfig {
     pub work_dir: PathBuf,
     pub mcp_servers: Vec<McpServer>,
     pub session_mode_id: Option<String>,
+    pub session_config_options: Vec<(String, String)>,
+    /// Config option id used to select the model (e.g. `"model"`). When set, the
+    /// provider re-applies this option from the per-completion `ModelConfig`
+    /// whenever the active session model changes.
+    pub model_config_option_id: Option<String>,
     pub mode_mapping: HashMap<GooseMode, String>,
     pub notification_callback: Option<Arc<dyn Fn(SessionNotification) + Send + Sync>>,
 }
@@ -88,16 +101,30 @@ enum AcpUpdate {
     Thought(String),
     ToolCallStart {
         id: String,
+        name: String,
+        kind: ToolKind,
+        raw_input: Option<serde_json::Value>,
     },
     ToolCallComplete {
         id: String,
+        raw_output: Option<serde_json::Value>,
+        content: Option<Vec<ToolCallContent>>,
+        is_error: bool,
     },
     PermissionRequest {
         request: Box<RequestPermissionRequest>,
         response_tx: oneshot::Sender<RequestPermissionResponse>,
     },
-    Complete(StopReason),
+    Complete(StopReason, Option<AcpUsage>),
     Error(String),
+}
+
+/// Per-tool-call buffer for accumulating ACP ToolCallUpdate fields across
+/// non-terminal updates, drained on the terminal status update.
+#[derive(Debug, Default)]
+struct AccumulatedToolCall {
+    raw_output: Option<serde_json::Value>,
+    content: Vec<ToolCallContent>,
 }
 
 /// The single ACP session backing this provider instance.
@@ -107,9 +134,13 @@ struct AcpSession {
     response: NewSessionResponse,
 }
 
+struct HandoffContextClaim {
+    first_prompt: bool,
+    include_context: bool,
+}
+
 pub struct AcpProvider {
     name: String,
-    model: ModelConfig,
     goose_mode: Arc<Mutex<GooseMode>>,
     mode_mapping: HashMap<GooseMode, String>,
 
@@ -117,6 +148,19 @@ pub struct AcpProvider {
 
     pending_confirmations:
         Arc<TokioMutex<HashMap<String, oneshot::Sender<PermissionConfirmation>>>>,
+    pending_tool_updates: Arc<Mutex<HashMap<String, AccumulatedToolCall>>>,
+    handoff_context_sent: AtomicBool,
+    /// Latest `size` reported by the ACP server in a `session/update` →
+    /// `usage_update` notification. 0 means no real update has arrived yet,
+    /// in which case `get_context_limit()` falls back to the supplied model
+    /// configuration's context limit.
+    context_size: Arc<AtomicU64>,
+
+    /// Config option id used to select the model, if this agent supports it.
+    model_config_option_id: Option<String>,
+    /// Model currently applied via `model_config_option_id`, used to avoid
+    /// redundant `SetConfigOption` calls.
+    applied_model: Arc<Mutex<Option<String>>>,
 
     tx: Option<mpsc::Sender<ClientRequest>>,
     loop_thread: Option<JoinHandle<()>>,
@@ -126,7 +170,6 @@ impl std::fmt::Debug for AcpProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AcpProvider")
             .field("name", &self.name)
-            .field("model", &self.model)
             .finish()
     }
 }
@@ -144,13 +187,11 @@ fn spawn_client_loop(fut: impl Future<Output = ()> + Send + 'static) -> JoinHand
 impl AcpProvider {
     pub async fn connect(
         name: String,
-        model: ModelConfig,
         goose_mode: GooseMode,
         config: AcpProviderConfig,
     ) -> Result<Self> {
         Self::start(
             name,
-            model,
             goose_mode,
             config,
             Box::new(|cl, rx, init_tx| Box::pin(cl.spawn(rx, init_tx))),
@@ -161,14 +202,12 @@ impl AcpProvider {
     #[doc(hidden)]
     pub async fn connect_with_transport(
         name: String,
-        model: ModelConfig,
         goose_mode: GooseMode,
         config: AcpProviderConfig,
-        transport: impl sacp::ConnectTo<Client> + 'static,
+        transport: impl agent_client_protocol::ConnectTo<Client> + 'static,
     ) -> Result<Self> {
         Self::start(
             name,
-            model,
             goose_mode,
             config,
             Box::new(move |cl, mut rx, init_tx| {
@@ -184,7 +223,6 @@ impl AcpProvider {
 
     async fn start(
         name: String,
-        model: ModelConfig,
         goose_mode: GooseMode,
         config: AcpProviderConfig,
         run: ClientLoopFn,
@@ -192,8 +230,24 @@ impl AcpProvider {
         let (tx, rx) = mpsc::channel(32);
         let (init_tx, init_rx) = oneshot::channel();
         let mode_mapping = config.mode_mapping.clone();
+        let model_config_option_id = config.model_config_option_id.clone();
+        let applied_model = config.model_config_option_id.as_ref().and_then(|id| {
+            config
+                .session_config_options
+                .iter()
+                .find(|(opt_id, _)| opt_id == id)
+                .map(|(_, value)| value.clone())
+        });
         let goose_mode_shared = Arc::new(Mutex::new(goose_mode));
-        let client_loop = AcpClientLoop::new(config, goose_mode_shared.clone());
+        let pending_tool_updates: Arc<Mutex<HashMap<String, AccumulatedToolCall>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let context_size = Arc::new(AtomicU64::new(0));
+        let client_loop = AcpClientLoop::new(
+            config,
+            goose_mode_shared.clone(),
+            pending_tool_updates.clone(),
+            context_size.clone(),
+        );
         let loop_thread = spawn_client_loop(run(client_loop, rx, init_tx));
 
         let _init_response = init_rx
@@ -211,21 +265,6 @@ impl AcpProvider {
             .await
             .context("ACP session creation cancelled")??;
 
-        // Resolve model from the session response.
-        let resolved_model = if model.model_name == ACP_CURRENT_MODEL {
-            if let Ok((resolved, _)) = resolve_model_info(&name, &response) {
-                tracing::info!(from = ACP_CURRENT_MODEL, to = %resolved, "resolved ACP model");
-                ModelConfig {
-                    model_name: resolved,
-                    ..model
-                }
-            } else {
-                model
-            }
-        } else {
-            model
-        };
-
         let session = AcpSession {
             id: response.session_id.clone(),
             response,
@@ -233,11 +272,15 @@ impl AcpProvider {
 
         Ok(Self {
             name,
-            model: resolved_model,
             goose_mode: goose_mode_shared,
             mode_mapping,
             session,
             pending_confirmations: Arc::new(TokioMutex::new(HashMap::new())),
+            pending_tool_updates,
+            handoff_context_sent: AtomicBool::new(false),
+            context_size,
+            model_config_option_id,
+            applied_model: Arc::new(Mutex::new(applied_model)),
             tx: Some(tx),
             loop_thread: Some(loop_thread),
         })
@@ -285,6 +328,39 @@ impl AcpProvider {
         response_rx.await.context("ACP request cancelled")?
     }
 
+    /// Re-apply the model selection config option when the active session model
+    /// differs from what was last applied. ACP agents that select their model
+    /// via a config option (e.g. Copilot) need this so resumed or switched
+    /// sessions actually use the requested model instead of the agent default.
+    async fn apply_model_if_changed(&self, model_name: &str) -> Result<()> {
+        let Some(config_id) = self.model_config_option_id.clone() else {
+            return Ok(());
+        };
+        if model_name == ACP_CURRENT_MODEL {
+            return Ok(());
+        }
+
+        {
+            let applied = self
+                .applied_model
+                .lock()
+                .map_err(|_| anyhow::anyhow!("applied_model lock poisoned"))?;
+            if applied.as_deref() == Some(model_name) {
+                return Ok(());
+            }
+        }
+
+        self.send_set_config_option("", config_id, model_name.to_string())
+            .await?;
+
+        let mut applied = self
+            .applied_model
+            .lock()
+            .map_err(|_| anyhow::anyhow!("applied_model lock poisoned"))?;
+        *applied = Some(model_name.to_string());
+        Ok(())
+    }
+
     async fn prompt(
         &self,
         session_id: SessionId,
@@ -311,6 +387,21 @@ impl AcpProvider {
             .as_ref()
             .is_some_and(|opts| opts.iter().any(|o| o.category.as_ref() == Some(&category)))
     }
+
+    fn claim_handoff_context(&self, messages: &[Message]) -> HandoffContextClaim {
+        let first_prompt = !self.handoff_context_sent.swap(true, Ordering::AcqRel);
+        HandoffContextClaim {
+            first_prompt,
+            include_context: first_prompt && has_handoff_context(messages),
+        }
+    }
+}
+
+fn fresh_text_run() -> (String, i64) {
+    (
+        uuid::Uuid::new_v4().to_string(),
+        chrono::Utc::now().timestamp(),
+    )
 }
 
 #[async_trait::async_trait]
@@ -319,8 +410,12 @@ impl Provider for AcpProvider {
         &self.name
     }
 
-    fn get_model_config(&self) -> ModelConfig {
-        self.model.clone()
+    async fn get_context_limit(&self, model_config: &ModelConfig) -> Result<usize, ProviderError> {
+        let size = self.context_size.load(Ordering::Relaxed);
+        if size > 0 {
+            return Ok(size as usize);
+        }
+        Ok(model_config.context_limit())
     }
 
     async fn update_mode(&self, session_id: &str, mode: GooseMode) -> Result<(), ProviderError> {
@@ -369,19 +464,37 @@ impl Provider for AcpProvider {
 
     async fn stream(
         &self,
-        _model_config: &ModelConfig,
-        _session_id: &str,
+        model_config: &ModelConfig,
         _system: &str,
         messages: &[Message],
         _tools: &[Tool],
     ) -> Result<MessageStream, ProviderError> {
         let session_id = self.acp_session_id();
 
-        let prompt_blocks = messages_to_prompt(messages);
-        let mut rx = self
-            .prompt(session_id, prompt_blocks)
+        self.apply_model_if_changed(&model_config.model_name)
             .await
-            .map_err(|e| ProviderError::RequestFailed(format!("Failed to send ACP prompt: {e}")))?;
+            .map_err(|e| {
+                ProviderError::RequestFailed(format!("Failed to set ACP model option: {e}"))
+            })?;
+
+        let claim = self.claim_handoff_context(messages);
+        let prompt_blocks = messages_to_prompt(messages, claim.include_context);
+        // Drop any tool-call buffer state left over from a prior prompt
+        // (e.g. cancelled or interrupted before its terminal status arrived).
+        if let Ok(mut buffer) = self.pending_tool_updates.lock() {
+            buffer.clear();
+        }
+        let mut rx = match self.prompt(session_id, prompt_blocks).await {
+            Ok(rx) => rx,
+            Err(e) => {
+                if claim.first_prompt {
+                    self.handoff_context_sent.store(false, Ordering::Release);
+                }
+                return Err(ProviderError::RequestFailed(format!(
+                    "Failed to send ACP prompt: {e}"
+                )));
+            }
+        };
 
         let pending_confirmations = self.pending_confirmations.clone();
         let goose_mode = *self
@@ -390,37 +503,105 @@ impl Provider for AcpProvider {
             .map_err(|_| ProviderError::RequestFailed("goose_mode lock poisoned".into()))?;
 
         let reject_all_tools = goose_mode == GooseMode::Chat;
+        let model_name = model_config.model_name.clone();
+
         Ok(Box::pin(try_stream! {
             let mut suppress_text = false;
             let mut rejected_tool_calls: HashSet<String> = HashSet::new();
+            // Stable id+timestamp per contiguous run so Desktop coalesces chunks into one bubble.
+            let mut text_run: Option<(String, i64)> = None;
+            let mut thought_run: Option<(String, i64)> = None;
 
             while let Some(update) = rx.recv().await {
                 match update {
                     AcpUpdate::Text(text) => {
                         if !suppress_text {
-                            let message = Message::assistant().with_text(text);
+                            let (id, ts) = text_run
+                                .get_or_insert_with(fresh_text_run)
+                                .clone();
+                            let message = Message::new(Role::Assistant, ts, vec![])
+                                .with_text(text)
+                                .with_id(id);
                             yield (Some(message), None);
                         }
                     }
                     AcpUpdate::Thought(text) => {
-                        let message = Message::assistant()
+                        let (id, ts) = thought_run
+                            .get_or_insert_with(fresh_text_run)
+                            .clone();
+                        let message = Message::new(Role::Assistant, ts, vec![])
                             .with_thinking(text, "")
-                            .with_visibility(true, false);
+                            .with_visibility(true, false)
+                            .with_id(id);
                         yield (Some(message), None);
                     }
-                    AcpUpdate::ToolCallStart { id, .. } => {
+                    AcpUpdate::ToolCallStart { id, name, kind, raw_input } => {
+                        text_run = None;
+                        thought_run = None;
                         if reject_all_tools {
                             suppress_text = true;
                             rejected_tool_calls.insert(id);
+                        } else {
+                            let mut params = CallToolRequestParams::new(name);
+                            if let Some(serde_json::Value::Object(map)) = raw_input {
+                                params = params.with_arguments(map);
+                            }
+                            // external_dispatch tells the agent loop not to redispatch this
+                            // call. goose.acp.kind preserves ACP's stable categorization for
+                            // downstream consumers (metrics, observability, icon selection)
+                            // independent of the display title we put in `name`.
+                            let tool_meta = Some(serde_json::json!({
+                                TOOL_META_EXTERNAL_DISPATCH_KEY: true,
+                                "goose.acp.kind": kind,
+                            }));
+                            let message = Message::assistant().with_tool_request_with_metadata(
+                                id,
+                                Ok(params),
+                                None,
+                                tool_meta,
+                            );
+                            yield (Some(message), None);
                         }
                     }
-                    AcpUpdate::ToolCallComplete { id, .. } => {
+                    AcpUpdate::ToolCallComplete {
+                        id,
+                        raw_output,
+                        content,
+                        is_error,
+                    } => {
+                        text_run = None;
+                        thought_run = None;
                         if rejected_tool_calls.remove(&id) {
-                            let message = Message::assistant().with_text("Tool call was denied.");
+                            // In chat mode no tool_request was emitted (suppressed at
+                            // ToolCallStart), so surface a plain text message. In other
+                            // modes a tool_request WAS emitted, so pair it with an error
+                            // tool_response so downstream consumers see the rejection.
+                            if reject_all_tools {
+                                let message = Message::assistant()
+                                    .with_text("Tool call was denied.");
+                                yield (Some(message), None);
+                            } else {
+                                let denial = vec![RmcpContent::text("Tool call was denied.")];
+                                let result = CallToolResult::error(denial);
+                                let message =
+                                    Message::user().with_tool_response(id, Ok(result));
+                                yield (Some(message), None);
+                            }
+                        } else {
+                            let result_content =
+                                acp_tool_call_content_to_rmcp(content, raw_output);
+                            let result = if is_error {
+                                CallToolResult::error(result_content)
+                            } else {
+                                CallToolResult::success(result_content)
+                            };
+                            let message = Message::user().with_tool_response(id, Ok(result));
                             yield (Some(message), None);
                         }
                     }
                     AcpUpdate::PermissionRequest { request, response_tx } => {
+                        text_run = None;
+                        thought_run = None;
                         if let Some(decision) = permission_decision_from_mode(goose_mode) {
                             if decision.should_record_rejection() {
                                 rejected_tool_calls.insert(request.tool_call.tool_call_id.0.to_string());
@@ -454,7 +635,18 @@ impl Provider for AcpProvider {
                         }
                         let _ = response_tx.send(map_permission_response(&request, decision));
                     }
-                    AcpUpdate::Complete(_reason) => {
+                    AcpUpdate::Complete(_reason, usage) => {
+                        if let Some(usage) = usage {
+                            let provider_usage = ProviderUsage::new(
+                                model_name.clone(),
+                                Usage::new(
+                                    Some(usage.input_tokens as i32),
+                                    Some(usage.output_tokens as i32),
+                                    Some(usage.total_tokens as i32),
+                                ),
+                            );
+                            yield (None, Some(provider_usage));
+                        }
                         break;
                     }
                     AcpUpdate::Error(e) => {
@@ -486,14 +678,23 @@ struct AcpClientLoop {
     config: AcpProviderConfig,
     goose_mode: Arc<Mutex<GooseMode>>,
     prompt_response_tx: Arc<Mutex<Option<mpsc::Sender<AcpUpdate>>>>,
+    pending_tool_updates: Arc<Mutex<HashMap<String, AccumulatedToolCall>>>,
+    context_size: Arc<AtomicU64>,
 }
 
 impl AcpClientLoop {
-    fn new(config: AcpProviderConfig, goose_mode: Arc<Mutex<GooseMode>>) -> Self {
+    fn new(
+        config: AcpProviderConfig,
+        goose_mode: Arc<Mutex<GooseMode>>,
+        pending_tool_updates: Arc<Mutex<HashMap<String, AccumulatedToolCall>>>,
+        context_size: Arc<AtomicU64>,
+    ) -> Self {
         Self {
             config,
             goose_mode,
             prompt_response_tx: Arc::new(Mutex::new(None)),
+            pending_tool_updates,
+            context_size,
         }
     }
 
@@ -525,13 +726,20 @@ impl AcpClientLoop {
     ) -> Result<()> {
         let stdin = child.stdin.take().context("no stdin")?;
         let stdout = child.stdout.take().context("no stdout")?;
-        let transport = sacp::ByteStreams::new(stdin.compat_write(), stdout.compat());
-        self.run(transport, rx, init_tx).await
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(forward_child_stderr(stderr));
+        }
+        let transport =
+            agent_client_protocol::ByteStreams::new(stdin.compat_write(), stdout.compat());
+        let result = self.run(transport, rx, init_tx).await;
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        result
     }
 
     async fn run(
         self,
-        transport: impl sacp::ConnectTo<Client> + 'static,
+        transport: impl agent_client_protocol::ConnectTo<Client> + 'static,
         rx: &mut mpsc::Receiver<ClientRequest>,
         init_tx: oneshot::Sender<Result<InitializeResponse>>,
     ) -> Result<()> {
@@ -539,6 +747,8 @@ impl AcpClientLoop {
             config,
             goose_mode,
             prompt_response_tx,
+            pending_tool_updates,
+            context_size,
         } = self;
         let notification_callback = config.notification_callback.clone();
         let reverse_modes = reverse_mode_mapping(&config.mode_mapping);
@@ -550,6 +760,8 @@ impl AcpClientLoop {
                     let prompt_response_tx = prompt_response_tx.clone();
                     let reverse_modes = reverse_modes.clone();
                     let goose_mode = goose_mode.clone();
+                    let pending_tool_updates = pending_tool_updates.clone();
+                    let context_size = context_size.clone();
                     async move |notification: SessionNotification, _cx| {
                         if let Some(ref cb) = notification_callback {
                             cb(notification.clone());
@@ -583,6 +795,9 @@ impl AcpClientLoop {
                                     }
                                 }
                             }
+                            SessionUpdate::UsageUpdate(usage) => {
+                                context_size.store(usage.size, Ordering::Relaxed);
+                            }
                             _ => {}
                         }
                         if let Some(tx) = prompt_response_tx
@@ -605,14 +820,98 @@ impl AcpClientLoop {
                                     let _ = tx.try_send(AcpUpdate::Thought(text));
                                 }
                                 SessionUpdate::ToolCall(tool_call) => {
+                                    let id = tool_call.tool_call_id.0.to_string();
+                                    let initial_status = tool_call.status;
+                                    let synchronous_terminal = matches!(
+                                        initial_status,
+                                        ToolCallStatus::Completed | ToolCallStatus::Failed
+                                    );
+                                    // Seed the buffer; drain immediately if the call is
+                                    // already terminal (synchronous tool, no follow-up).
+                                    let synchronous_accumulated =
+                                        if let Ok(mut buffer) = pending_tool_updates.lock() {
+                                            let entry = buffer.entry(id.clone()).or_default();
+                                            if let Some(raw_output) = tool_call.raw_output.clone() {
+                                                entry.raw_output = Some(raw_output);
+                                            }
+                                            entry.content.extend(tool_call.content.clone());
+                                            if synchronous_terminal {
+                                                buffer.remove(&id)
+                                            } else {
+                                                None
+                                            }
+                                        } else {
+                                            None
+                                        };
+                                    // ACP carries no canonical tool name to clients — only
+                                    // `title` (display) and `kind` (category). We pass `title`
+                                    // for renderer affordance, surface `kind` separately via
+                                    // tool_meta for stable categorization, and the
+                                    // goose.external_dispatch marker keeps `name` off the
+                                    // agent loop's routing/auth paths.
                                     let _ = tx.try_send(AcpUpdate::ToolCallStart {
-                                        id: tool_call.tool_call_id.0.to_string(),
+                                        id: id.clone(),
+                                        name: tool_call.title.clone(),
+                                        kind: tool_call.kind,
+                                        raw_input: tool_call.raw_input.clone(),
                                     });
+                                    if let Some(accumulated) = synchronous_accumulated {
+                                        let content = if accumulated.content.is_empty() {
+                                            None
+                                        } else {
+                                            Some(accumulated.content)
+                                        };
+                                        let _ = tx.try_send(AcpUpdate::ToolCallComplete {
+                                            id,
+                                            raw_output: accumulated.raw_output,
+                                            content,
+                                            is_error: matches!(
+                                                initial_status,
+                                                ToolCallStatus::Failed
+                                            ),
+                                        });
+                                    }
                                 }
                                 SessionUpdate::ToolCallUpdate(update) => {
-                                    if update.fields.status.is_some() {
+                                    let id = update.tool_call_id.0.to_string();
+                                    // Merge patch-like fields; only emit on terminal status.
+                                    let terminal_status = update.fields.status.filter(|s| {
+                                        matches!(
+                                            s,
+                                            ToolCallStatus::Completed | ToolCallStatus::Failed
+                                        )
+                                    });
+                                    let accumulated = if let Ok(mut buffer) =
+                                        pending_tool_updates.lock()
+                                    {
+                                        let entry = buffer.entry(id.clone()).or_default();
+                                        if let Some(raw_output) = update.fields.raw_output.clone() {
+                                            entry.raw_output = Some(raw_output);
+                                        }
+                                        if let Some(content) = update.fields.content.clone() {
+                                            entry.content.extend(content);
+                                        }
+                                        if terminal_status.is_some() {
+                                            buffer.remove(&id)
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    };
+                                    if let (Some(accumulated), Some(status)) =
+                                        (accumulated, terminal_status)
+                                    {
+                                        let content = if accumulated.content.is_empty() {
+                                            None
+                                        } else {
+                                            Some(accumulated.content)
+                                        };
                                         let _ = tx.try_send(AcpUpdate::ToolCallComplete {
-                                            id: update.tool_call_id.0.to_string(),
+                                            id,
+                                            raw_output: accumulated.raw_output,
+                                            content,
+                                            is_error: matches!(status, ToolCallStatus::Failed),
                                         });
                                     }
                                 }
@@ -622,7 +921,7 @@ impl AcpClientLoop {
                         Ok(())
                     }
                 },
-                sacp::on_receive_notification!(),
+                agent_client_protocol::on_receive_notification!(),
             )
             .on_receive_request(
                 {
@@ -635,17 +934,18 @@ impl AcpClientLoop {
                             .ok()
                             .as_ref()
                             .and_then(|g| g.as_ref().cloned());
-                        let tx = handler.ok_or_else(sacp::Error::internal_error)?;
+                        let tx =
+                            handler.ok_or_else(agent_client_protocol::Error::internal_error)?;
 
                         if tx.is_closed() {
-                            return Err(sacp::Error::internal_error());
+                            return Err(agent_client_protocol::Error::internal_error());
                         }
 
                         tx.try_send(AcpUpdate::PermissionRequest {
                             request: Box::new(request),
                             response_tx,
                         })
-                        .map_err(|_| sacp::Error::internal_error())?;
+                        .map_err(|_| agent_client_protocol::Error::internal_error())?;
 
                         let response = response_rx.await.unwrap_or_else(|_| {
                             RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
@@ -653,7 +953,7 @@ impl AcpClientLoop {
                         responder.respond(response)
                     }
                 },
-                sacp::on_receive_request!(),
+                agent_client_protocol::on_receive_request!(),
             )
             .connect_with(transport, async move |cx: ConnectionTo<Agent>| {
                 handle_requests(config, goose_mode, cx, rx, prompt_response_tx, init_tx).await
@@ -664,12 +964,56 @@ impl AcpClientLoop {
     }
 }
 
+/// Forwards an ACP child's stderr to tracing line by line.
+///
+/// Lines longer than `MAX_LINE_LEN` are flushed in chunks so a child that
+/// emits unbounded output without newlines (e.g. carriage-return progress
+/// bars or binary data) cannot cause unbounded memory growth.
+async fn forward_child_stderr(mut stderr: tokio::process::ChildStderr) {
+    const MAX_LINE_LEN: usize = 8192;
+    const READ_CHUNK: usize = 1024;
+
+    let mut line: Vec<u8> = Vec::with_capacity(256);
+    let mut chunk = [0u8; READ_CHUNK];
+    loop {
+        match stderr.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(n) => {
+                for &b in &chunk[..n] {
+                    if b == b'\n' {
+                        emit_stderr_line(&mut line);
+                    } else {
+                        line.push(b);
+                        if line.len() >= MAX_LINE_LEN {
+                            emit_stderr_line(&mut line);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!(target: "acp::child::stderr", error = %e, "stderr read error");
+                break;
+            }
+        }
+    }
+    emit_stderr_line(&mut line);
+}
+
+fn emit_stderr_line(line: &mut Vec<u8>) {
+    if line.is_empty() {
+        return;
+    }
+    let trimmed = line.strip_suffix(b"\r").unwrap_or(line);
+    tracing::info!(target: "acp::child::stderr", "{}", String::from_utf8_lossy(trimmed));
+    line.clear();
+}
+
 async fn spawn_acp_process(config: &AcpProviderConfig) -> Result<Child> {
     let mut cmd = Command::new(&config.command);
     cmd.args(&config.args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::piped())
         .kill_on_drop(true);
 
     for key in &config.env_remove {
@@ -697,7 +1041,7 @@ async fn handle_requests(
     rx: &mut mpsc::Receiver<ClientRequest>,
     prompt_response_tx: Arc<Mutex<Option<mpsc::Sender<AcpUpdate>>>>,
     init_tx: oneshot::Sender<Result<InitializeResponse>>,
-) -> Result<(), sacp::Error> {
+) -> Result<(), agent_client_protocol::Error> {
     let mut init_tx = Some(init_tx);
 
     let client_capabilities = ClientCapabilities::new();
@@ -713,7 +1057,7 @@ async fn handle_requests(
             if let Some(tx) = init_tx.take() {
                 let _ = tx.send(Err(anyhow::anyhow!(message.clone())));
             }
-            sacp::Error::internal_error().data(message)
+            agent_client_protocol::Error::internal_error().data(message)
         })?;
 
     let supports_close = init_response
@@ -741,6 +1085,8 @@ async fn handle_requests(
                 let result = match session {
                     Ok(session) => {
                         session_ids.push(session.session_id.clone());
+                        apply_session_config_options(&config, &cx, session.session_id.clone())
+                            .await?;
                         apply_session_mode(&config, &goose_mode, &cx, session).await
                     }
                     Err(err) => Err(anyhow::anyhow!(
@@ -772,7 +1118,7 @@ async fn handle_requests(
                 value,
                 response_tx,
             } => {
-                let value_id = sacp::schema::SessionConfigValueId::new(value);
+                let value_id = agent_client_protocol::schema::v1::SessionConfigValueId::new(value);
                 let req = SetSessionConfigOptionRequest::new(session_id, config_id, value_id);
                 let result: Result<()> = cx
                     .send_request(req)
@@ -800,7 +1146,7 @@ async fn handle_requests(
                 match response {
                     Ok(r) => {
                         log_undelivered(
-                            response_tx.try_send(AcpUpdate::Complete(r.stop_reason)),
+                            response_tx.try_send(AcpUpdate::Complete(r.stop_reason, r.usage)),
                             AGENT_METHOD_NAMES.session_prompt,
                         );
                     }
@@ -829,6 +1175,31 @@ async fn handle_requests(
         }
     }
 
+    Ok(())
+}
+
+async fn apply_session_config_options(
+    config: &AcpProviderConfig,
+    cx: &ConnectionTo<Agent>,
+    session_id: SessionId,
+) -> Result<()> {
+    for (config_id, value) in &config.session_config_options {
+        let value_id = agent_client_protocol::schema::v1::SessionConfigValueId::new(value.clone());
+        cx.send_request(SetSessionConfigOptionRequest::new(
+            session_id.clone(),
+            config_id.clone(),
+            value_id,
+        ))
+        .block_task()
+        .await
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "ACP agent rejected {} for '{}': {err}",
+                AGENT_METHOD_NAMES.session_set_config_option,
+                config_id
+            )
+        })?;
+    }
     Ok(())
 }
 
@@ -950,32 +1321,128 @@ fn filter_supported_servers(
         .collect()
 }
 
-fn messages_to_prompt(messages: &[Message]) -> Vec<ContentBlock> {
+fn messages_to_prompt(messages: &[Message], include_handoff_context: bool) -> Vec<ContentBlock> {
     let mut content_blocks = Vec::new();
 
-    let last_user = messages
-        .iter()
-        .rev()
-        .find(|m| m.role == Role::User && m.is_agent_visible());
+    let Some(last_user_index) = last_user_message_index(messages) else {
+        return content_blocks;
+    };
 
-    if let Some(message) = last_user {
-        for content in &message.content {
-            match content {
-                MessageContent::Text(text) => {
-                    content_blocks.push(ContentBlock::Text(TextContent::new(text.text.clone())));
+    if include_handoff_context {
+        if let Some(memo) = build_handoff_context_memo(&messages[..last_user_index]) {
+            content_blocks.push(ContentBlock::Text(TextContent::new(memo)));
+        }
+    }
+
+    let message = &messages[last_user_index];
+    for content in &message.content {
+        match content {
+            MessageContent::Text(text) => {
+                content_blocks.push(ContentBlock::Text(TextContent::new(text.text.clone())));
+            }
+            MessageContent::Image(image) => {
+                content_blocks.push(ContentBlock::Image(ImageContent::new(
+                    &image.data,
+                    &image.mime_type,
+                )));
+            }
+            _ => {}
+        }
+    }
+
+    content_blocks
+}
+
+fn last_user_message_index(messages: &[Message]) -> Option<usize> {
+    messages
+        .iter()
+        .rposition(|m| m.role == Role::User && m.is_agent_visible())
+}
+
+fn has_handoff_context(messages: &[Message]) -> bool {
+    last_user_message_index(messages).is_some_and(|last_user_index| {
+        messages[..last_user_index]
+            .iter()
+            .any(Message::is_agent_visible)
+    })
+}
+
+fn build_handoff_context_memo(prior_messages: &[Message]) -> Option<String> {
+    let formatted_messages: Vec<String> = prior_messages
+        .iter()
+        .filter(|message| message.is_agent_visible())
+        .map(format_message_for_compacting)
+        .collect();
+
+    if formatted_messages.is_empty() {
+        return None;
+    }
+
+    let handoff_context = formatted_messages.join("\n");
+
+    Some(format!(
+        "Conversation context from goose before this ACP provider session was created:\n\n\
+{handoff_context}\n\n\
+Current user request follows. Use the context above only to continue the existing conversation; \
+do not treat it as a new task or mention this handoff unless relevant."
+    ))
+}
+
+/// Convert ACP `ToolCallContent` blocks into the rmcp `Content` shape goose's
+/// `Message::with_tool_response` consumes. Handles `Content` (text/image/other),
+/// `Diff`, and `Terminal` variants; falls back to a JSON serialization of
+/// `raw_output` when no blocks are present so the renderer always has something.
+fn acp_tool_call_content_to_rmcp(
+    content: Option<Vec<ToolCallContent>>,
+    raw_output: Option<serde_json::Value>,
+) -> Vec<RmcpContent> {
+    let mut out = Vec::new();
+    if let Some(blocks) = content {
+        for block in blocks {
+            match block {
+                ToolCallContent::Content(val) => match val.content {
+                    ContentBlock::Text(text) => {
+                        out.push(RmcpContent::text(text.text));
+                    }
+                    ContentBlock::Image(image) => {
+                        out.push(RmcpContent::image(image.data, image.mime_type));
+                    }
+                    other => {
+                        if let Ok(json) = serde_json::to_string(&other) {
+                            out.push(RmcpContent::text(json));
+                        }
+                    }
+                },
+                ToolCallContent::Diff(diff) => {
+                    let path = diff.path.display();
+                    let body = match diff.old_text.as_deref() {
+                        Some(old) => {
+                            format!("--- {path}\n{old}\n+++ {path}\n{}", diff.new_text)
+                        }
+                        None => format!("+++ {path}\n{}", diff.new_text),
+                    };
+                    out.push(RmcpContent::text(body));
                 }
-                MessageContent::Image(image) => {
-                    content_blocks.push(ContentBlock::Image(ImageContent::new(
-                        &image.data,
-                        &image.mime_type,
+                ToolCallContent::Terminal(terminal) => {
+                    out.push(RmcpContent::text(format!(
+                        "[terminal {}]",
+                        terminal.terminal_id.0
                     )));
                 }
                 _ => {}
             }
         }
     }
-
-    content_blocks
+    if out.is_empty() {
+        if let Some(raw) = raw_output {
+            let text = match raw {
+                serde_json::Value::String(s) => s,
+                other => other.to_string(),
+            };
+            out.push(RmcpContent::text(text));
+        }
+    }
+    out
 }
 
 fn build_action_required_message(request: &RequestPermissionRequest) -> Option<Message> {
@@ -1064,18 +1531,9 @@ fn resolve_model_info(
         }
     }
 
-    let models = response.models.as_ref().ok_or_else(|| {
-        ProviderError::RequestFailed(format!(
-            "{provider_name}: agent returned neither config_options nor models"
-        ))
-    })?;
-    let current = models.current_model_id.0.to_string();
-    let available = models
-        .available_models
-        .iter()
-        .map(|am| am.model_id.0.to_string())
-        .collect();
-    Ok((current, available))
+    Err(ProviderError::RequestFailed(format!(
+        "{provider_name}: agent returned no model config_options"
+    )))
 }
 
 fn reverse_mode_mapping(
@@ -1117,8 +1575,260 @@ fn permission_decision_from_mode(goose_mode: GooseMode) -> Option<PermissionDeci
 mod tests {
     use super::*;
     use crate::agents::extension::Envs;
-    use sacp::schema::SessionConfigSelectOption;
+    use agent_client_protocol::schema::v1::SessionConfigSelectOption;
     use test_case::test_case;
+
+    fn prompt_text(block: &ContentBlock) -> &str {
+        match block {
+            ContentBlock::Text(text) => &text.text,
+            _ => panic!("expected text block"),
+        }
+    }
+
+    fn test_provider() -> (AcpProvider, ModelConfig) {
+        test_provider_with_tx(None)
+    }
+
+    fn test_provider_with_tx(
+        tx: Option<mpsc::Sender<ClientRequest>>,
+    ) -> (AcpProvider, ModelConfig) {
+        (
+            AcpProvider {
+                name: "acp-test".to_string(),
+                goose_mode: Arc::new(Mutex::new(GooseMode::Auto)),
+                mode_mapping: HashMap::new(),
+                session: AcpSession {
+                    id: SessionId::new("test-session"),
+                    response: NewSessionResponse::new("test-session"),
+                },
+                pending_confirmations: Arc::new(TokioMutex::new(HashMap::new())),
+                pending_tool_updates: Arc::new(Mutex::new(HashMap::new())),
+                handoff_context_sent: AtomicBool::new(false),
+                context_size: Arc::new(AtomicU64::new(0)),
+                model_config_option_id: None,
+                applied_model: Arc::new(Mutex::new(None)),
+                tx,
+                loop_thread: None,
+            },
+            ModelConfig::new("test-model"),
+        )
+    }
+
+    #[test]
+    fn messages_to_prompt_without_prior_history_preserves_current_prompt() {
+        let messages = vec![Message::user().with_text("current request")];
+
+        let blocks = messages_to_prompt(&messages, true);
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(prompt_text(&blocks[0]), "current request");
+    }
+
+    #[test]
+    fn messages_to_prompt_prepends_handoff_context_before_latest_user() {
+        let messages = vec![
+            Message::user().with_text("inspect src/lib.rs"),
+            Message::assistant()
+                .with_text("I found the file")
+                .with_tool_request("call-1", Ok(CallToolRequestParams::new("read_file"))),
+            Message::user().with_tool_response(
+                "call-1",
+                Ok(CallToolResult::success(vec![RmcpContent::text(
+                    "file contents",
+                )])),
+            ),
+            Message::user().with_text("continue from there"),
+        ];
+
+        let blocks = messages_to_prompt(&messages, true);
+
+        assert_eq!(blocks.len(), 2);
+        let memo = prompt_text(&blocks[0]);
+        assert!(memo.starts_with(
+            "Conversation context from goose before this ACP provider session was created:"
+        ));
+        assert!(memo.contains("[user]: inspect src/lib.rs"));
+        assert!(memo.contains("[assistant]: I found the file"));
+        assert!(memo.contains("tool_request(read_file):"));
+        assert!(memo.contains("tool_response: file contents"));
+        assert!(memo.contains("Current user request follows."));
+        assert_eq!(prompt_text(&blocks[1]), "continue from there");
+    }
+
+    #[test]
+    fn messages_to_prompt_keeps_latest_user_images_after_handoff_memo() {
+        let messages = vec![
+            Message::assistant().with_text("prior answer"),
+            Message::user()
+                .with_image("base64-image", "image/png")
+                .with_text("describe this"),
+        ];
+
+        let blocks = messages_to_prompt(&messages, true);
+
+        assert_eq!(blocks.len(), 3);
+        assert!(prompt_text(&blocks[0]).contains("[assistant]: prior answer"));
+        match &blocks[1] {
+            ContentBlock::Image(image) => {
+                assert_eq!(image.data, "base64-image");
+                assert_eq!(image.mime_type, "image/png");
+            }
+            _ => panic!("expected image block"),
+        }
+        assert_eq!(prompt_text(&blocks[2]), "describe this");
+    }
+
+    #[test]
+    fn handoff_context_is_sent_only_on_first_provider_prompt() {
+        let (provider, _) = test_provider();
+        let messages = vec![
+            Message::assistant().with_text("prior answer"),
+            Message::user().with_text("current request"),
+        ];
+
+        let first_claim = provider.claim_handoff_context(&messages);
+        assert!(first_claim.first_prompt);
+        assert!(first_claim.include_context);
+
+        let second_claim = provider.claim_handoff_context(&messages);
+        assert!(!second_claim.first_prompt);
+        assert!(!second_claim.include_context);
+    }
+
+    #[test]
+    fn first_prompt_without_history_still_marks_handoff_context_sent() {
+        let (provider, _) = test_provider();
+        let first_prompt = vec![Message::user().with_text("new conversation")];
+        let later_prompt_with_history = vec![
+            Message::assistant().with_text("prior answer"),
+            Message::user().with_text("current request"),
+        ];
+
+        let first_claim = provider.claim_handoff_context(&first_prompt);
+        assert!(first_claim.first_prompt);
+        assert!(!first_claim.include_context);
+
+        let later_claim = provider.claim_handoff_context(&later_prompt_with_history);
+        assert!(!later_claim.first_prompt);
+        assert!(!later_claim.include_context);
+    }
+
+    #[tokio::test]
+    async fn get_context_limit_surfaces_captured_context_size() {
+        let (provider, model) = test_provider();
+        assert_eq!(
+            provider.get_context_limit(&model).await.unwrap(),
+            goose_providers::model::DEFAULT_CONTEXT_LIMIT
+        );
+
+        provider.context_size.store(200_000, Ordering::Relaxed);
+        assert_eq!(provider.get_context_limit(&model).await.unwrap(), 200_000);
+    }
+
+    #[tokio::test]
+    async fn failed_first_prompt_send_rolls_back_handoff_context_claim() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let (provider, model) = test_provider_with_tx(Some(tx));
+        let messages = vec![
+            Message::assistant().with_text("prior answer"),
+            Message::user().with_text("current request"),
+        ];
+
+        let result = provider.stream(&model, "", &messages, &[]).await;
+
+        assert!(matches!(result, Err(ProviderError::RequestFailed(_))));
+        let next_claim = provider.claim_handoff_context(&messages);
+        assert!(next_claim.first_prompt);
+        assert!(next_claim.include_context);
+    }
+
+    fn test_provider_with_model_option(
+        tx: mpsc::Sender<ClientRequest>,
+        applied_model: Option<String>,
+    ) -> AcpProvider {
+        let (mut provider, _) = test_provider_with_tx(Some(tx));
+        provider.model_config_option_id = Some("model".to_string());
+        provider.applied_model = Arc::new(Mutex::new(applied_model));
+        provider
+    }
+
+    #[tokio::test]
+    async fn apply_model_if_changed_sends_set_config_option_on_change() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let provider = test_provider_with_model_option(tx, Some("old-model".to_string()));
+
+        let handle =
+            tokio::spawn(async move { provider.apply_model_if_changed("new-model").await });
+
+        match rx.recv().await.expect("expected a SetConfigOption request") {
+            ClientRequest::SetConfigOption {
+                config_id,
+                value,
+                response_tx,
+                ..
+            } => {
+                assert_eq!(config_id, "model");
+                assert_eq!(value, "new-model");
+                let _ = response_tx.send(Ok(()));
+            }
+            _ => panic!("unexpected request kind"),
+        }
+
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_model_if_changed_skips_when_model_unchanged() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let provider = test_provider_with_model_option(tx, Some("same-model".to_string()));
+
+        provider.apply_model_if_changed("same-model").await.unwrap();
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn apply_model_if_changed_noop_without_option_id() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let (provider, _) = test_provider_with_tx(Some(tx));
+
+        provider.apply_model_if_changed("any-model").await.unwrap();
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn apply_model_if_changed_skips_sentinel_model() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let provider = test_provider_with_model_option(tx, None);
+
+        provider
+            .apply_model_if_changed(ACP_CURRENT_MODEL)
+            .await
+            .unwrap();
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn messages_to_prompt_includes_all_prior_handoff_context() {
+        let messages = vec![
+            Message::user().with_text("older context that should be retained"),
+            Message::assistant().with_text("middle context"),
+            Message::assistant().with_text("recent context"),
+            Message::user().with_text("current request"),
+        ];
+
+        let blocks = messages_to_prompt(&messages, true);
+
+        assert_eq!(blocks.len(), 2);
+        let memo = prompt_text(&blocks[0]);
+        assert!(memo.contains("[user]: older context that should be retained"));
+        assert!(memo.contains("[assistant]: middle context"));
+        assert!(memo.contains("[assistant]: recent context"));
+        assert_eq!(prompt_text(&blocks[1]), "current request");
+    }
 
     #[test_case(
         ExtensionConfig::Stdio {
@@ -1129,6 +1839,7 @@ mod tests {
             envs: Envs::new([("GITHUB_PERSONAL_ACCESS_TOKEN".into(), "ghp_xxxxxxxxxxxx".into())].into()),
             env_keys: vec![],
             timeout: None,
+            cwd: None,
             bundled: Some(false),
             available_tools: vec![],
         },
@@ -1150,6 +1861,7 @@ mod tests {
             env_keys: vec![],
             headers: HashMap::from([("Authorization".into(), "Bearer ghp_xxxxxxxxxxxx".into())]),
             timeout: None,
+            socket: None,
             bundled: Some(false),
             available_tools: vec![],
         },
@@ -1203,6 +1915,7 @@ mod tests {
             env_keys: vec![],
             headers: HashMap::from([("Authorization".into(), "Bearer ghp_xxxxxxxxxxxx".into())]),
             timeout: None,
+            socket: None,
             bundled: Some(false),
             available_tools: vec![],
         };
@@ -1285,14 +1998,6 @@ mod tests {
 
     #[test_case(
         NewSessionResponse::new("s1")
-            .models(sacp::schema::SessionModelState::new(
-                "default",
-                vec![
-                    sacp::schema::ModelInfo::new("default", "Default (recommended)"),
-                    sacp::schema::ModelInfo::new("sonnet", "Sonnet"),
-                    sacp::schema::ModelInfo::new("haiku", "Haiku"),
-                ],
-            ))
             .config_options(vec![
                 SessionConfigOption::select("model", "Model", "default", vec![
                     SessionConfigSelectOption::new("default", "Default (recommended)"),
@@ -1302,27 +2007,27 @@ mod tests {
                 .category(SessionConfigOptionCategory::Model),
             ])
         => Ok(("default".to_string(), vec!["default".to_string(), "sonnet".to_string(), "haiku".to_string()]))
-        ; "claude-agent-acp config_options supersedes models"
+        ; "model is resolved from config_options"
     )]
     #[test_case(
         NewSessionResponse::new("s1")
-            .models(sacp::schema::SessionModelState::new(
-                "auto-gemini-3",
-                vec![
-                    sacp::schema::ModelInfo::new("auto-gemini-3", "Auto (Gemini 3)"),
-                    sacp::schema::ModelInfo::new("auto-gemini-2.5", "Auto (Gemini 2.5)"),
-                    sacp::schema::ModelInfo::new("gemini-2.5-pro", "gemini-2.5-pro"),
-                ],
-            ))
+            .config_options(vec![
+                SessionConfigOption::select("model", "Model", "auto-gemini-3", vec![
+                    SessionConfigSelectOption::new("auto-gemini-3", "Auto (Gemini 3)"),
+                    SessionConfigSelectOption::new("auto-gemini-2.5", "Auto (Gemini 2.5)"),
+                    SessionConfigSelectOption::new("gemini-2.5-pro", "gemini-2.5-pro"),
+                ])
+                .category(SessionConfigOptionCategory::Model),
+            ])
         => Ok(("auto-gemini-3".to_string(), vec!["auto-gemini-3".to_string(), "auto-gemini-2.5".to_string(), "gemini-2.5-pro".to_string()]))
-        ; "gemini-acp falls back to models"
+        ; "model with multiple options"
     )]
     #[test_case(
         NewSessionResponse::new("s1")
         => Err(ProviderError::RequestFailed(
-            "test: agent returned neither config_options nor models".to_string()
+            "test: agent returned no model config_options".to_string()
         ))
-        ; "neither config_options nor models is an error"
+        ; "missing model config_options is an error"
     )]
     fn test_resolve_model_info(
         response: NewSessionResponse,
@@ -1369,6 +2074,97 @@ mod tests {
             assert!(result == Some(GooseMode::Approve) || result == Some(GooseMode::Chat));
         } else {
             assert_eq!(result, expected);
+        }
+    }
+
+    #[test]
+    fn acp_tool_call_content_handles_text_diff_terminal_and_image() {
+        use agent_client_protocol::schema::v1::{Diff, Terminal, TerminalId, TextContent};
+
+        let diff_block = ToolCallContent::Diff(
+            Diff::new(std::path::PathBuf::from("/tmp/file.txt"), "new\n").old_text("old\n"),
+        );
+        let terminal_block = ToolCallContent::Terminal(Terminal::new(TerminalId::new("term-7")));
+        let text_block = ToolCallContent::Content(agent_client_protocol::schema::v1::Content::new(
+            ContentBlock::Text(TextContent::new("hello")),
+        ));
+        let image_block =
+            ToolCallContent::Content(agent_client_protocol::schema::v1::Content::new(
+                ContentBlock::Image(ImageContent::new("base64data", "image/png")),
+            ));
+
+        let out = acp_tool_call_content_to_rmcp(
+            Some(vec![text_block, diff_block, terminal_block, image_block]),
+            None,
+        );
+
+        assert_eq!(out.len(), 4, "all four block kinds should produce output");
+        let serialized: Vec<String> = out
+            .iter()
+            .map(|c| serde_json::to_string(c).unwrap())
+            .collect();
+        assert!(
+            serialized[0].contains("hello"),
+            "text block lost: {serialized:?}"
+        );
+        assert!(
+            serialized[1].contains("/tmp/file.txt"),
+            "diff path lost: {serialized:?}"
+        );
+        assert!(
+            serialized[1].contains("new"),
+            "diff body lost: {serialized:?}"
+        );
+        assert!(
+            serialized[2].contains("term-7"),
+            "terminal id lost: {serialized:?}"
+        );
+        assert!(
+            serialized[3].contains("base64data"),
+            "image data lost: {serialized:?}"
+        );
+    }
+
+    #[test]
+    fn acp_tool_call_content_falls_back_to_raw_output_when_blocks_empty() {
+        let out =
+            acp_tool_call_content_to_rmcp(Some(vec![]), Some(serde_json::json!({"key": "value"})));
+        assert_eq!(out.len(), 1);
+        let serialized = serde_json::to_string(&out[0]).unwrap();
+        assert!(
+            serialized.contains("key"),
+            "fallback raw_output lost: {serialized}"
+        );
+    }
+
+    /// Pins the tool_meta shape that the `AcpUpdate::ToolCallStart` consumer
+    /// emits onto the synthesized `ToolRequest`. ACP doesn't expose a canonical
+    /// tool name to clients, so we surface `kind` here as a stable categorization
+    /// signal alongside the `external_dispatch` marker that bypasses agent-loop
+    /// routing.
+    #[test]
+    fn tool_meta_pairs_external_dispatch_marker_with_acp_kind() {
+        let cases = [
+            (ToolKind::Execute, "execute"),
+            (ToolKind::Read, "read"),
+            (ToolKind::Edit, "edit"),
+            (ToolKind::Other, "other"),
+        ];
+        for (kind, expected) in cases {
+            let tool_meta = serde_json::json!({
+                TOOL_META_EXTERNAL_DISPATCH_KEY: true,
+                "goose.acp.kind": kind,
+            });
+            assert_eq!(
+                tool_meta[TOOL_META_EXTERNAL_DISPATCH_KEY],
+                serde_json::Value::Bool(true),
+                "external_dispatch marker missing for kind={kind:?}"
+            );
+            assert_eq!(
+                tool_meta["goose.acp.kind"],
+                serde_json::Value::String(expected.to_string()),
+                "goose.acp.kind serialized wrong for kind={kind:?}"
+            );
         }
     }
 }

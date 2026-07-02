@@ -1,12 +1,15 @@
 import React, { memo, useMemo, useCallback, useState } from 'react';
 import { ProviderCard } from './subcomponents/ProviderCard';
 import CardContainer from './subcomponents/CardContainer';
-import ProviderConfigurationModal from './modal/ProviderConfiguationModal';
+import ProviderConfigurationModal from './modal/ProviderConfigurationModal';
+import { ProviderDetails, UpdateCustomProviderRequest } from '../../../api';
+import type { CustomProviderConfigDto } from '@aaif/goose-sdk';
 import {
-  DeclarativeProviderConfig,
-  ProviderDetails,
-  UpdateCustomProviderRequest,
-} from '../../../api';
+  acpCreateCustomProviderFromRequest,
+  acpGetCustomProvider,
+  acpDeleteCustomProvider,
+  acpUpdateCustomProviderFromRequest,
+} from '../../../acp/providers';
 import { Plus } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../ui/dialog';
 import CustomProviderForm from './modal/subcomponents/forms/CustomProviderForm';
@@ -68,7 +71,9 @@ const CustomProviderCard = memo(function CustomProviderCard({ onClick }: { onCli
           <Plus className="w-8 h-8 text-gray-400 mb-2" />
           <div className="text-sm text-gray-600 dark:text-gray-400 text-center">
             <div className="font-medium">{intl.formatMessage(i18n.addProvider)}</div>
-            <div className="text-xs text-gray-500 mt-1">{intl.formatMessage(i18n.fromTemplateOrManual)}</div>
+            <div className="text-xs text-gray-500 mt-1">
+              {intl.formatMessage(i18n.fromTemplateOrManual)}
+            </div>
           </div>
         </div>
       }
@@ -100,7 +105,7 @@ function ProviderCards({
   const { getCurrentModelAndProvider } = useModelAndProvider();
   const [editingProvider, setEditingProvider] = useState<{
     id: string;
-    config: DeclarativeProviderConfig;
+    config: CustomProviderConfigDto;
     isEditable: boolean;
     providerType: string;
   } | null>(null);
@@ -117,15 +122,14 @@ function ProviderCards({
 
   const configureProviderViaModal = useCallback(
     async (provider: ProviderDetails) => {
-      if (provider.provider_type === 'Custom' || provider.provider_type === 'Declarative') {
-        const { getCustomProvider } = await import('../../../api');
-        const result = await getCustomProvider({ path: { id: provider.name }, throwOnError: true });
+      if (provider.provider_type === 'Custom') {
+        const result = await acpGetCustomProvider(provider.name);
 
-        if (result.data) {
+        if (result) {
           setEditingProvider({
             id: provider.name,
-            config: result.data.config,
-            isEditable: result.data.is_editable,
+            config: result.provider,
+            isEditable: result.editable,
             providerType: provider.provider_type,
           });
 
@@ -150,12 +154,7 @@ function ProviderCards({
     async (data: UpdateCustomProviderRequest) => {
       if (!editingProvider) return;
 
-      const { updateCustomProvider } = await import('../../../api');
-      await updateCustomProvider({
-        path: { id: editingProvider.id },
-        body: data,
-        throwOnError: true,
-      });
+      await acpUpdateCustomProviderFromRequest(editingProvider.id, data);
       const providerId = editingProvider.id;
       setShowCustomProviderModal(false);
       setEditingProvider(null);
@@ -171,11 +170,7 @@ function ProviderCards({
   const handleDeleteCustomProvider = useCallback(async () => {
     if (!editingProvider) return;
 
-    const { removeCustomProvider } = await import('../../../api');
-    await removeCustomProvider({
-      path: { id: editingProvider.id },
-      throwOnError: true,
-    });
+    await acpDeleteCustomProvider(editingProvider.id);
     setShowCustomProviderModal(false);
     setEditingProvider(null);
     setIsActiveProvider(false);
@@ -225,9 +220,8 @@ function ProviderCards({
 
   const handleCreateCustomProvider = useCallback(
     async (data: UpdateCustomProviderRequest) => {
-      const { createCustomProvider } = await import('../../../api');
-      const result = await createCustomProvider({ body: data, throwOnError: true });
-      const providerId = result.data?.provider_name;
+      const result = await acpCreateCustomProviderFromRequest(data);
+      const providerId = result.provider_name;
       setShowCustomProviderModal(false);
       if (refreshProviders) {
         await refreshProviders();
@@ -264,20 +258,22 @@ function ProviderCards({
 
   const initialData = editingProvider && {
     engine: editingProvider.config.engine,
-    display_name: editingProvider.config.display_name,
-    api_url: editingProvider.config.base_url,
-    base_path: editingProvider.config.base_path ?? undefined,
+    display_name: editingProvider.config.displayName,
+    api_url: editingProvider.config.apiUrl,
+    base_path: editingProvider.config.basePath ?? undefined,
     api_key: '',
-    models: editingProvider.config.models.map((m) => m.name),
-    supports_streaming: editingProvider.config.supports_streaming ?? true,
-    requires_auth: editingProvider.config.requires_auth ?? true,
+    models: editingProvider.config.models ?? [],
+    supports_streaming: editingProvider.config.supportsStreaming ?? true,
+    requires_auth: editingProvider.config.requiresAuth ?? true,
     headers: editingProvider.config.headers ?? undefined,
-    catalog_provider_id: editingProvider.config.catalog_provider_id ?? undefined,
+    catalog_provider_id: editingProvider.config.catalogProviderId ?? undefined,
   };
 
   const editable = editingProvider ? editingProvider.isEditable : true;
   const title = editingProvider
-    ? (editable ? intl.formatMessage(i18n.editProvider) : intl.formatMessage(i18n.configureProvider))
+    ? editable
+      ? intl.formatMessage(i18n.editProvider)
+      : intl.formatMessage(i18n.configureProvider)
     : intl.formatMessage(i18n.addProviderTitle);
   return (
     <>
