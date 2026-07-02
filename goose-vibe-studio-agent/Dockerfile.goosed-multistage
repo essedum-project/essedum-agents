@@ -1,0 +1,59 @@
+# syntax=docker/dockerfile:1.4
+# Multi-stage build: compile goosed from Rust source, then package into minimal runtime
+# Build context: /home/useradmin/goose-vibe-studio-agent/essedum-agents/goose-vibe-studio-agent/
+
+# Stage 1: Build goosed binary from source
+FROM rust:1.82-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    pkg-config \
+    libssl-dev \
+    libdbus-1-dev \
+    libclang-dev \
+    protobuf-compiler \
+    libprotobuf-dev \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Import corporate CA certificates (Zscaler/Infosys proxy)
+COPY custom-certs/ /usr/local/share/ca-certificates/
+RUN update-ca-certificates
+
+WORKDIR /build
+COPY . .
+
+# Override rust-toolchain.toml to use minimal profile (skip docs download)
+RUN echo '[toolchain]\nchannel = "1.92"\nprofile = "minimal"' > rust-toolchain.toml
+
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
+ENV CARGO_PROFILE_RELEASE_LTO=true
+ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+ENV CARGO_PROFILE_RELEASE_OPT_LEVEL=z
+ENV CARGO_PROFILE_RELEASE_STRIP=true
+
+RUN cargo build --release -p goose-server
+
+# Stage 2: Minimal runtime image
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl3 \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m -u 1000 goose
+USER goose
+WORKDIR /home/goose
+
+COPY --from=builder /build/target/release/goosed /usr/local/bin/goosed
+
+ENV GOOSE_HOST=0.0.0.0
+ENV GOOSE_PORT=3005
+ENV GOOSE_TLS=false
+
+EXPOSE 3005
+
+ENTRYPOINT ["/usr/local/bin/goosed", "agent"]

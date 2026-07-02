@@ -5,11 +5,11 @@
 set -euo pipefail
 
 NAMESPACE="aipns"
-DEPLOY="builderk-service-2"
+DEPLOY="vibe-code-builder-service"
 ADDITIONS_FILE="$(dirname "$0")/app_additions.py"
 
 echo "[1/4] Checking pod is running..."
-POD=$(kubectl get pod -n "$NAMESPACE" -l app=builderk-2 -o jsonpath='{.items[0].metadata.name}')
+POD=$(kubectl get pod -n "$NAMESPACE" -l app=vibe-code-builder -o jsonpath='{.items[0].metadata.name}')
 echo "      Pod: $POD"
 
 echo "[2/4] Checking if /deploy route already patched..."
@@ -50,5 +50,5 @@ kubectl rollout restart deployment/"$DEPLOY" -n "$NAMESPACE"
 kubectl rollout status deployment/"$DEPLOY" -n "$NAMESPACE" --timeout=90s
 
 echo ""
-echo "Done! /deploy endpoint is now available on builderk-service-2."
-echo "Test: kubectl exec -n $NAMESPACE deploy/$DEPLOY -- curl -s -X POST http://localhost:5000/deploy -H 'Content-Type: application/json' -d '{\"session_id\":\"test\"}'"
+echo "Done! /deploy endpoint is now available on vibe-code-builder-service."
+echo "Test: kubectl exec -n $NAMESPACE deploy/$DEPLOY -- python3 -c \"import urllib.request; r=urllib.request.urlopen('http://localhost:5000/deploy',data=b'{\\\"session_id\\\":\\\"test\\\"}'); print(r.read())\""

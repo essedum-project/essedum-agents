@@ -15,6 +15,7 @@ COPY goosed-bin /usr/local/bin/goosed
 ENV GOOSE_HOST=0.0.0.0
 ENV GOOSE_PORT=3005
 ENV GOOSE_TLS=false
+ENV BUILDER_KIT2_URL=http://vibe-code-builder-service.aipns.svc.cluster.local:80
 
 EXPOSE 3005
 
