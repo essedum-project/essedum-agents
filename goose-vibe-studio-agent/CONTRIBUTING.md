@@ -71,7 +71,7 @@ can always reopen.
 ## Quick Responsible AI Tips
 
 There's no need to tell us you used AI in your work. You are contributing to an agent, it would be odd if 
-you had not. Our general thinking is, use AI anyway you want, but until the robot revolution comes, you
+you had not. Our general thinking is, use AI any way you want, but until the robot revolution comes, you
 are responsible for the final code. Before submitting a PR for review, make sure you have reviewed it yourself.
 We'll close any vibe coded submissions that obviously skip this step.
 
@@ -172,6 +172,17 @@ This command builds a release build of Rust (equivalent to `cargo build -r`) and
 The app opens a window and displays first-time setup. After completing setup, goose is ready for use.
 
 Make GUI changes in `ui/desktop`.
+
+#### Troubleshooting: blank screen on `just run-ui`
+
+If the app opens to a blank window (logs show `Cannot read properties of null (reading 'useRef')`), your `node_modules` is out of date and is loading two copies of React. Delete it and reinstall:
+
+```
+rm -rf ui/desktop/node_modules
+cd ui && pnpm install
+```
+
+See #8757.
 
 ### Regenerating the OpenAPI schema
 
@@ -349,16 +360,6 @@ This project follows the [Conventional Commits](https://www.conventionalcommits.
 [issues]: https://github.com/aaif-goose/goose/issues
 [hermit]: https://cashapp.github.io/hermit/
 [just]: https://github.com/casey/just?tab=readme-ov-file#installation
-
-## Developer Certificate of Origin
-
-This project requires a [Developer Certificate of Origin](https://en.wikipedia.org/wiki/Developer_Certificate_of_Origin) sign-offs on all commits. This is a statement indicating that you are allowed to make the contribution and that the project has the right to distribute it under its license. When you are ready to commit, use the `--signoff` or `-s` flag to attach the sign-off to your commit.
-
-```
-git commit --signoff ...
-# OR
-git commit -s ...
-```
 
 ## Other Ways to Contribute
 

@@ -1,5 +1,5 @@
 use chrono::Utc;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 
 type HmacSha256 = Hmac<Sha256>;
@@ -174,5 +174,133 @@ pub async fn maybe_upload(session_id: &str, path: String, content: String) {
     {
         Ok(()) => tracing::info!("Uploaded {} to MinIO bucket {}", path, bucket),
         Err(e) => tracing::warn!("MinIO upload failed for {}: {}", path, e),
+    }
+}
+
+/// Scan `working_dir` for app source files and upload them all to MinIO under `session_id`.
+/// This ensures files are available in MinIO even if the agent used `edit` instead of `write`,
+/// or if a new session reuses files from a previous session's working directory.
+pub async fn sync_working_dir_to_minio(session_id: &str, working_dir: &std::path::Path) {
+    if std::env::var("GOOSE_MINIO_UPLOAD_ENABLED").as_deref() != Ok("true") {
+        return;
+    }
+
+    let endpoint = match std::env::var("GOOSE_MINIO_ENDPOINT") {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let access_key = match std::env::var("GOOSE_MINIO_ACCESS_KEY") {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let secret_key = match std::env::var("GOOSE_MINIO_SECRET_KEY") {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let bucket = match std::env::var("GOOSE_MINIO_BUCKET") {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let region =
+        std::env::var("GOOSE_MINIO_REGION").unwrap_or_else(|_| "us-east-1".to_string());
+    let prefix =
+        std::env::var("GOOSE_MINIO_PREFIX").unwrap_or_else(|_| "goose-apps".to_string());
+
+    let app_extensions: &[&str] = &[
+        "js", "jsx", "ts", "tsx", "css", "html", "json", "md", "svg", "png", "jpg", "ico",
+        "mjs", "cjs",
+    ];
+    let app_filenames: &[&str] = &["Dockerfile", ".dockerignore", ".env"];
+    let skip_dirs: &[&str] = &[
+        "node_modules", ".git", "build", "dist", ".next", "__pycache__", "target",
+        ".config", ".local", ".cache", ".npm", ".yarn",
+    ];
+
+    let mut files_to_upload: Vec<(String, Vec<u8>)> = Vec::new();
+    collect_files(
+        working_dir,
+        working_dir,
+        app_extensions,
+        app_filenames,
+        skip_dirs,
+        5,
+        &mut files_to_upload,
+    );
+
+    let mut uploaded = 0u32;
+    for (relative, content) in &files_to_upload {
+        let object_key = format!(
+            "{}/{}/{}",
+            prefix.trim_end_matches('/'),
+            session_id,
+            relative
+        );
+
+        match upload(
+            &endpoint,
+            &access_key,
+            &secret_key,
+            &bucket,
+            &region,
+            &object_key,
+            content,
+        )
+        .await
+        {
+            Ok(()) => uploaded += 1,
+            Err(e) => tracing::warn!("MinIO sync failed for {}: {}", relative, e),
+        }
+    }
+
+    tracing::info!(
+        "Synced {} files from {} to MinIO for session {}",
+        uploaded,
+        working_dir.display(),
+        session_id
+    );
+}
+
+fn collect_files(
+    base: &std::path::Path,
+    dir: &std::path::Path,
+    extensions: &[&str],
+    filenames: &[&str],
+    skip_dirs: &[&str],
+    max_depth: u32,
+    result: &mut Vec<(String, Vec<u8>)>,
+) {
+    if max_depth == 0 {
+        return;
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        if path.is_dir() {
+            // Skip explicitly listed dirs and any hidden directories (starting with .)
+            if skip_dirs.contains(&name.as_str()) || name.starts_with('.') {
+                continue;
+            }
+            collect_files(base, &path, extensions, filenames, skip_dirs, max_depth - 1, result);
+        } else if path.is_file() {
+            let ext = path
+                .extension()
+                .map(|e| e.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let is_relevant =
+                extensions.iter().any(|e| *e == ext) || filenames.contains(&name.as_str());
+            if !is_relevant {
+                continue;
+            }
+            if let Ok(relative) = path.strip_prefix(base) {
+                if let Ok(content) = std::fs::read(&path) {
+                    result.push((relative.to_string_lossy().to_string(), content));
+                }
+            }
+        }
     }
 }

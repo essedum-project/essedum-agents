@@ -6,79 +6,16 @@ pub mod code_execution;
 pub mod developer;
 pub mod ext_manager;
 pub mod orchestrator;
-pub mod skills;
 pub mod summarize;
 pub mod summon;
 pub mod todo;
 pub mod tom;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use crate::agents::mcp_client::McpClientTrait;
 use crate::session::Session;
 use once_cell::sync::Lazy;
-use serde::Deserialize;
-use tracing::warn;
-
-#[derive(Debug, Clone)]
-pub struct Source {
-    pub name: String,
-    pub kind: SourceKind,
-    pub description: String,
-    pub path: PathBuf,
-    pub content: String,
-    pub supporting_files: Vec<PathBuf>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum SourceKind {
-    Subrecipe,
-    Recipe,
-    Skill,
-    Agent,
-    BuiltinSkill,
-}
-
-impl std::fmt::Display for SourceKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SourceKind::Subrecipe => write!(f, "subrecipe"),
-            SourceKind::Recipe => write!(f, "recipe"),
-            SourceKind::Skill => write!(f, "skill"),
-            SourceKind::Agent => write!(f, "agent"),
-            SourceKind::BuiltinSkill => write!(f, "builtin skill"),
-        }
-    }
-}
-
-impl Source {
-    pub fn to_load_text(&self) -> String {
-        format!(
-            "## {} ({})\n\n{}\n\n### Content\n\n{}",
-            self.name, self.kind, self.description, self.content
-        )
-    }
-}
-
-pub fn parse_frontmatter<T: for<'de> Deserialize<'de>>(content: &str) -> Option<(T, String)> {
-    let parts: Vec<&str> = content.split("---").collect();
-    if parts.len() < 3 {
-        return None;
-    }
-
-    let yaml_content = parts[1].trim();
-    let metadata: T = match serde_yaml::from_str(yaml_content) {
-        Ok(m) => m,
-        Err(e) => {
-            warn!("Failed to parse frontmatter: {}", e);
-            return None;
-        }
-    };
-
-    let body = parts[2..].join("---").trim().to_string();
-    Some((metadata, body))
-}
 
 pub use ext_manager::MANAGE_EXTENSIONS_TOOL_NAME_COMPLETE;
 
@@ -253,15 +190,15 @@ pub static PLATFORM_EXTENSIONS: Lazy<HashMap<&'static str, PlatformExtensionDef>
         );
 
         map.insert(
-            skills::EXTENSION_NAME,
+            crate::skills::EXTENSION_NAME,
             PlatformExtensionDef {
-                name: skills::EXTENSION_NAME,
+                name: crate::skills::EXTENSION_NAME,
                 display_name: "Skills",
                 description: "Discover and provide skill instructions from filesystem and builtins",
                 default_enabled: true,
-                unprefixed_tools: false,
-                hidden: true,
-                client_factory: |ctx| Box::new(skills::SkillsClient::new(ctx).unwrap()),
+                unprefixed_tools: true,
+                hidden: false,
+                client_factory: |ctx| Box::new(crate::skills::SkillsClient::new(ctx).unwrap()),
             },
         );
 
@@ -275,9 +212,31 @@ pub struct PlatformExtensionContext {
         Option<std::sync::Weak<crate::agents::extension_manager::ExtensionManager>>,
     pub session_manager: std::sync::Arc<crate::session::SessionManager>,
     pub session: Option<std::sync::Arc<Session>>,
+    pub use_login_shell_path: bool,
 }
 
 impl PlatformExtensionContext {
+    pub async fn model_config_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<goose_providers::model::ModelConfig, String> {
+        if let Ok(session) = self.session_manager.get_session(session_id, false).await {
+            if let Some(model_config) = session.model_config {
+                return Ok(model_config);
+            }
+        }
+
+        let config = crate::config::Config::global();
+        let provider_name = config
+            .get_goose_provider()
+            .map_err(|_| "Could not resolve model config: missing provider".to_string())?;
+        let model_name = config
+            .get_goose_model()
+            .map_err(|_| "Could not resolve model config: missing model".to_string())?;
+        crate::model_config::model_config_from_user_config(&provider_name, &model_name)
+            .map_err(|e| format!("Could not resolve model config: {e}"))
+    }
+
     pub fn result_with_platform_notification(
         &self,
         mut result: rmcp::model::CallToolResult,

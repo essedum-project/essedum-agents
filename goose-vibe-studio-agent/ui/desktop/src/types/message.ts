@@ -14,9 +14,6 @@ export type ToolConfirmationRequestContent = ToolConfirmationRequest & {
 };
 export type NotificationEvent = Extract<MessageEvent, { type: 'Notification' }>;
 
-// Compaction response message - must match backend constant
-const COMPACTION_THINKING_TEXT = 'goose is compacting the conversation...';
-
 export interface ImageData {
   data: string; // base64 encoded image data
   mimeType: string;
@@ -53,28 +50,6 @@ export function createUserMessage(text: string, images?: ImageData[]): Message {
   };
 }
 
-export function createElicitationResponseMessage(
-  elicitationId: string,
-  userData: Record<string, unknown>
-): Message {
-  return {
-    id: generateMessageId(),
-    role: 'user',
-    created: Math.floor(Date.now() / 1000),
-    content: [
-      {
-        type: 'actionRequired',
-        data: {
-          actionType: 'elicitationResponse',
-          id: elicitationId,
-          user_data: userData,
-        },
-      },
-    ],
-    metadata: { userVisible: false, agentVisible: true },
-  };
-}
-
 export function generateMessageId(): string {
   return Math.random().toString(36).substring(2, 10);
 }
@@ -94,19 +69,34 @@ export function getTextAndImageContent(message: Message): {
     }
   }
 
+  // Strip assistant-only markup that shouldn't appear in rendered text
+  if (message.role === 'assistant') {
+    textContent = stripToolCallMarkers(textContent);
+  }
+
   return { textContent, imagePaths };
 }
 
-export function getThinkingContent(message: Message): string | null {
-  const thinkingContents = message.content
-    .filter((content) => content.type === 'thinking')
-    .map((content) => {
-      if ('thinking' in content) return content.thinking;
-      return '';
-    })
-    .filter((text) => text.length > 0);
+function stripToolCallMarkers(text: string): string {
+  // Remove all tool call XML markers and their content
+  return text
+    .replace(/<\|tool_calls_section_begin\|>[\s\S]*?<\|tool_calls_section_end\|>/g, '')
+    .replace(/<\|tool_call_begin\|>[\s\S]*?<\|tool_call_end\|>/g, '')
+    .replace(/<\|tool_call_argument_begin\|>[\s\S]*?<\|tool_call_argument_end\|>/g, '')
+    .trim();
+}
 
-  return thinkingContents.length > 0 ? thinkingContents.join('') : null;
+export function getThinkingContent(message: Message): string | null {
+  const parts: string[] = [];
+
+  // Structured thinking content blocks
+  for (const content of message.content) {
+    if (content.type === 'thinking' && 'thinking' in content && content.thinking) {
+      parts.push(content.thinking);
+    }
+  }
+
+  return parts.length > 0 ? parts.join('') : null;
 }
 
 export function getToolRequests(message: Message): (ToolRequest & { type: 'toolRequest' })[] {
@@ -222,22 +212,6 @@ export function getThinkingMessage(message: Message | undefined): string | undef
   for (const content of message.content) {
     if (content.type === 'systemNotification' && content.notificationType === 'thinkingMessage') {
       return content.msg;
-    }
-  }
-
-  return undefined;
-}
-
-export function getCompactingMessage(message: Message | undefined): string | undefined {
-  if (!message || message.role !== 'assistant') {
-    return undefined;
-  }
-
-  for (const content of message.content) {
-    if (content.type === 'systemNotification' && content.notificationType === 'thinkingMessage') {
-      if (content.msg === COMPACTION_THINKING_TEXT) {
-        return content.msg;
-      }
     }
   }
 

@@ -1,5 +1,5 @@
 import { NavigateFunction } from 'react-router-dom';
-import { Recipe } from '../api';
+import type { Recipe } from '../recipe';
 import { UserInput } from '../types/message';
 
 export type View =
@@ -14,23 +14,20 @@ export type View =
   | 'settingsV2'
   | 'sessions'
   | 'schedules'
-  | 'sharedSession'
   | 'loading'
   | 'recipes'
+  | 'skills'
   | 'permission';
 
 export type ViewOptions = {
   showEnvVars?: boolean;
   deepLinkConfig?: unknown;
-  sessionDetails?: unknown;
   error?: string;
-  baseUrl?: string;
   recipe?: Recipe;
   parentView?: View;
   parentViewOptions?: ViewOptions;
   disableAnimation?: boolean;
   initialMessage?: UserInput;
-  shareToken?: string;
   resumeSessionId?: string;
   pendingScheduleDeepLink?: string;
 };
@@ -66,16 +63,15 @@ export const createNavigationHandler = (navigate: NavigateFunction) => {
       case 'recipes':
         navigate('/recipes', { state: options });
         break;
+      case 'skills':
+        navigate('/skills', { state: options });
+        break;
       case 'permission':
         navigate('/permission', { state: options });
         break;
       case 'ConfigureProviders':
         navigate('/configure-providers', { state: options });
         break;
-      case 'sharedSession':
-        navigate('/shared-session', { state: options });
-        break;
-
       case 'extensions':
         navigate('/extensions', { state: options });
         break;

@@ -4,7 +4,8 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use subtle::ConstantTimeEq;
+pub use goose::acp::transport::auth::check_acp_token;
+use goose::acp::transport::auth::token_matches;
 
 pub async fn check_token(
     State(state): State<String>,
@@ -12,8 +13,6 @@ pub async fn check_token(
     next: Next,
 ) -> Result<Response, StatusCode> {
     if request.uri().path() == "/status"
-        || request.uri().path() == "/features"
-        || request.uri().path() == "/mcp-ui-proxy"
         || request.uri().path() == "/mcp-app-proxy"
         || request.uri().path() == "/mcp-app-guest"
     {
@@ -24,10 +23,9 @@ pub async fn check_token(
         .get("X-Secret-Key")
         .and_then(|value| value.to_str().ok());
 
-    match secret_key {
-        Some(key) if bool::from(key.as_bytes().ct_eq(state.as_bytes())) => {
-            Ok(next.run(request).await)
-        }
-        _ => Err(StatusCode::UNAUTHORIZED),
+    if token_matches(secret_key, &state) {
+        Ok(next.run(request).await)
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
     }
 }

@@ -2,7 +2,6 @@ import { ScrollArea } from '../ui/scroll-area';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 import { View, ViewOptions } from '../../utils/navigationUtils';
 import ModelsSection from './models/ModelsSection';
-import SessionSharingSection from './sessions/SessionSharingSection';
 import ExternalBackendSection from './app/ExternalBackendSection';
 import AppSettingsSection from './app/AppSettingsSection';
 import ConfigSettings from './config/ConfigSettings';
@@ -17,16 +16,13 @@ import {
   FileText,
   Keyboard,
   HardDrive,
-  Network,
+  KeyRound,
 } from 'lucide-react';
 import { useState, useEffect, useRef } from 'react';
-import TunnelSection from './tunnel/TunnelSection';
-import GatewaySettingsSection from './gateways/GatewaySettingsSection';
-import { getTunnelStatus } from '../../api/sdk.gen';
 import ChatSettingsSection from './chat/ChatSettingsSection';
 import KeyboardShortcutsSection from './keyboard/KeyboardShortcutsSection';
+import AuthSettingsSection from './auth/AuthSettingsSection';
 import LocalInferenceSection from './localInference/LocalInferenceSection';
-import MeshSection from './mesh/MeshSection';
 import { CONFIGURATION_ENABLED } from '../../updates';
 import { trackSettingsTabViewed } from '../../utils/analytics';
 import { useFeatures } from '../../contexts/FeaturesContext';
@@ -61,6 +57,10 @@ const i18n = defineMessages({
     id: 'settingsView.tabKeyboard',
     defaultMessage: 'Keyboard',
   },
+  tabAuth: {
+    id: 'settingsView.tabAuth',
+    defaultMessage: 'Auth',
+  },
   tabApp: {
     id: 'settingsView.tabApp',
     defaultMessage: 'App',
@@ -71,7 +71,6 @@ export type SettingsViewOptions = {
   deepLinkConfig?: ExtensionConfig;
   showEnvVars?: boolean;
   section?: string;
-  sessionId?: string;
 };
 
 export default function SettingsView({
@@ -84,7 +83,6 @@ export default function SettingsView({
   viewOptions: SettingsViewOptions;
 }) {
   const [activeTab, setActiveTab] = useState('models');
-  const [tunnelDisabled, setTunnelDisabled] = useState(false);
   const hasTrackedInitialTab = useRef(false);
   const { localInference } = useFeatures();
   const intl = useIntl();
@@ -109,31 +107,23 @@ export default function SettingsView({
         chat: 'chat',
         prompts: 'prompts',
         keyboard: 'keyboard',
-        gateway: 'sharing',
+        auth: 'auth',
         'local-inference': 'local-inference',
-        mesh: 'mesh',
       };
 
       const targetTab = sectionToTab[viewOptions.section];
-      if (
-        targetTab &&
-        (targetTab !== 'local-inference' || localInference) &&
-        (targetTab !== 'mesh' || !tunnelDisabled)
-      ) {
+      if (targetTab && (targetTab !== 'local-inference' || localInference)) {
         setActiveTab(targetTab);
       }
     }
-  }, [viewOptions.section, localInference, tunnelDisabled]);
+  }, [viewOptions.section, localInference]);
 
-  // Reset active tab if local-inference or mesh becomes unavailable
+  // Reset active tab if local-inference becomes unavailable
   useEffect(() => {
     if (!localInference && activeTab === 'local-inference') {
       setActiveTab('models');
     }
-    if (tunnelDisabled && activeTab === 'mesh') {
-      setActiveTab('models');
-    }
-  }, [localInference, tunnelDisabled, activeTab]);
+  }, [localInference, activeTab]);
 
   useEffect(() => {
     if (!hasTrackedInitialTab.current) {
@@ -141,16 +131,6 @@ export default function SettingsView({
       hasTrackedInitialTab.current = true;
     }
   }, [activeTab]);
-
-  useEffect(() => {
-    getTunnelStatus()
-      .then(({ data }) => {
-        setTunnelDisabled(data?.state === 'disabled');
-      })
-      .catch(() => {
-        setTunnelDisabled(false);
-      });
-  }, []);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -204,16 +184,6 @@ export default function SettingsView({
                       {intl.formatMessage(i18n.tabLocalInference)}
                     </TabsTrigger>
                   )}
-                  {!tunnelDisabled && (
-                    <TabsTrigger
-                      value="mesh"
-                      className="flex gap-2"
-                      data-testid="settings-mesh-tab"
-                    >
-                      <Network className="h-4 w-4" />
-                      Mesh
-                    </TabsTrigger>
-                  )}
                   <TabsTrigger value="chat" className="flex gap-2" data-testid="settings-chat-tab">
                     <MessageSquare className="h-4 w-4" />
                     {intl.formatMessage(i18n.tabChat)}
@@ -242,6 +212,10 @@ export default function SettingsView({
                     <Keyboard className="h-4 w-4" />
                     {intl.formatMessage(i18n.tabKeyboard)}
                   </TabsTrigger>
+                  <TabsTrigger value="auth" className="flex gap-2" data-testid="settings-auth-tab">
+                    <KeyRound className="h-4 w-4" />
+                    {intl.formatMessage(i18n.tabAuth)}
+                  </TabsTrigger>
                   <TabsTrigger value="app" className="flex gap-2" data-testid="settings-app-tab">
                     <Monitor className="h-4 w-4" />
                     {intl.formatMessage(i18n.tabApp)}
@@ -266,20 +240,11 @@ export default function SettingsView({
                   </TabsContent>
                 )}
 
-                {!tunnelDisabled && (
-                  <TabsContent
-                    value="mesh"
-                    className="mt-0 focus-visible:outline-none focus-visible:ring-0"
-                  >
-                    <MeshSection />
-                  </TabsContent>
-                )}
-
                 <TabsContent
                   value="chat"
                   className="mt-0 focus-visible:outline-none focus-visible:ring-0"
                 >
-                  <ChatSettingsSection sessionId={viewOptions.sessionId} />
+                  <ChatSettingsSection />
                 </TabsContent>
 
                 <TabsContent
@@ -287,14 +252,7 @@ export default function SettingsView({
                   className="mt-0 focus-visible:outline-none focus-visible:ring-0"
                 >
                   <div className="space-y-8 pb-8">
-                    <SessionSharingSection />
                     <ExternalBackendSection />
-                    {!tunnelDisabled && (
-                      <div className="space-y-4">
-                        <TunnelSection />
-                        <GatewaySettingsSection />
-                      </div>
-                    )}
                   </div>
                 </TabsContent>
 
@@ -310,6 +268,13 @@ export default function SettingsView({
                   className="mt-0 focus-visible:outline-none focus-visible:ring-0"
                 >
                   <KeyboardShortcutsSection />
+                </TabsContent>
+
+                <TabsContent
+                  value="auth"
+                  className="mt-0 focus-visible:outline-none focus-visible:ring-0"
+                >
+                  <AuthSettingsSection />
                 </TabsContent>
 
                 <TabsContent

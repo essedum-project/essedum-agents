@@ -10,10 +10,11 @@ async fn main() {
         .with_max_level(tracing::Level::INFO)
         .init();
 
+    let session_id = "minio-upload-test".to_string();
     let path = "goose-test/hello.txt".to_string();
     let content = "Hello from goose! MinIO upload test.\n".to_string();
 
     println!("Uploading '{}' to MinIO ...", path);
-    maybe_upload(path.clone(), content).await;
+    maybe_upload(&session_id, path.clone(), content).await;
     println!("Done. Check MinIO bucket for '{}'.", path);
 }

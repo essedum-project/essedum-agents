@@ -1,0 +1,405 @@
+================================================================================
+GOOSE API ENDPOINTS REFERENCE
+================================================================================
+
+--------------------------------------------------------------------------------
+ACTION REQUIRED
+--------------------------------------------------------------------------------
+POST   /action-required/tool-confirmation
+  Request:  { id, sessionId, action: Permission, principalType? }
+  Response: {}
+
+--------------------------------------------------------------------------------
+AGENT
+--------------------------------------------------------------------------------
+POST   /agent/start
+  Request:  { working_dir, recipe?, recipe_id?, recipe_deeplink?, extension_overrides? }
+  Response: Session
+
+POST   /agent/stop
+  Request:  { session_id }
+  Response: string
+
+POST   /agent/restart
+  Request:  { session_id }
+  Response: { extension_results: [{ name, success, error? }] }
+
+POST   /agent/resume
+  Request:  { session_id, load_model_and_extensions }
+  Response: { session, extension_results? }
+
+POST   /agent/add_extension
+  Request:  { session_id, config: ExtensionConfig }
+  Response: string
+
+POST   /agent/remove_extension
+  Request:  { session_id, name }
+  Response: string
+
+POST   /agent/update_provider
+  Request:  { session_id, provider, model?, context_limit?, request_params? }
+  Response: (empty)
+
+POST   /agent/update_session
+  Request:  { session_id, goose_mode? }
+  Response: (empty)
+
+POST   /agent/update_working_dir
+  Request:  { session_id, working_dir }
+  Response: (empty)
+
+POST   /agent/update_from_session
+  Request:  { session_id }
+  Response: (empty)
+
+POST   /agent/call_tool
+  Request:  { session_id, name, arguments: object }
+  Response: { content, isError, _meta?, structuredContent? }
+
+POST   /agent/read_resource
+  Request:  { session_id, extension_name, uri }
+  Response: { uri, text, mimeType?, _meta? }
+
+GET    /agent/tools
+  Query:    session_id (required), extension_name (optional)
+  Response: [{ name, description, parameters, input_schema?, permission? }]
+
+GET    /agent/list_apps
+  Query:    session_id (optional)
+  Response: { apps: [GooseApp] }
+
+GET    /agent/export_app/{name}
+  Response: string (HTML)
+
+POST   /agent/import_app
+  Request:  { html }
+  Response: { name, message }
+
+--------------------------------------------------------------------------------
+REPLY / CHAT
+--------------------------------------------------------------------------------
+POST   /reply
+  Request:  { session_id, user_message: Message, override_conversation?, recipe_name?, recipe_version? }
+  Response: SSE stream of MessageEvent
+
+  Message structure:
+  {
+    "id": "string (optional)",
+    "role": "user | assistant",
+    "created": 1234567890,
+    "content": [ TextContent | ImageContent | ToolRequest | ToolResponse |
+                 ToolConfirmationRequest | ActionRequired | FrontendToolRequest |
+                 ThinkingContent | RedactedThinkingContent | SystemNotificationContent ],
+    "metadata": { "agentVisible": true, "userVisible": true }
+  }
+
+POST   /sessions/{id}/reply
+  Request:  { request_id, user_message: Message, override_conversation?, recipe_name?, recipe_version? }
+  Response: { request_id }
+
+POST   /sessions/{id}/cancel
+  Request:  { request_id }
+  Response: (empty)
+
+GET    /sessions/{id}/events
+  Response: SSE stream of [MessageEvent]
+
+--------------------------------------------------------------------------------
+SESSIONS
+--------------------------------------------------------------------------------
+GET    /sessions
+  Response: { sessions: [Session] }
+
+GET    /sessions/{session_id}
+  Response: Session
+
+DELETE /sessions/{session_id}
+  Response: (empty)
+
+GET    /sessions/{session_id}/export
+  Response: string (JSON)
+
+GET    /sessions/{session_id}/extensions
+  Response: { extensions: [ExtensionConfig] }
+
+POST   /sessions/{session_id}/fork
+  Request:  { copy, truncate, timestamp? }
+  Response: { sessionId }
+
+PUT    /sessions/{session_id}/name
+  Request:  { name }
+  Response: (empty)
+
+PUT    /sessions/{session_id}/user_recipe_values
+  Request:  { userRecipeValues: map<string, string> }
+  Response: { recipe }
+
+GET    /sessions/search
+  Query:    query, limit, after_date, before_date
+  Response: [Session]
+
+GET    /sessions/insights
+  Response: { totalSessions, totalTokens }
+
+POST   /sessions/import
+  Request:  { json }
+  Response: Session
+
+--------------------------------------------------------------------------------
+CONFIG MANAGEMENT
+--------------------------------------------------------------------------------
+GET    /config
+  Response: { config: map<string, any> }
+
+POST   /config/read
+  Request:  { key, is_secret }
+  Response: value
+
+POST   /config/upsert
+  Request:  { key, value, is_secret }
+  Response: string
+
+POST   /config/remove
+  Request:  { key, is_secret }
+  Response: string
+
+POST   /config/init
+  Response: string
+
+POST   /config/backup
+  Response: string
+
+POST   /config/recover
+  Response: string
+
+GET    /config/validate
+  Response: string
+
+POST   /config/set_provider
+  Request:  { provider, model }
+  Response: (empty)
+
+GET    /config/providers
+  Response: [{ name, is_configured, provider_type, metadata: {
+    name, display_name, description, default_model, model_doc_link,
+    config_keys, known_models, setup_steps?
+  }}]
+
+GET    /config/providers/{name}/models
+  Response: [string]
+
+POST   /config/providers/{name}/oauth
+  Response: (empty)
+
+POST   /config/providers/{name}/cleanup
+  Response: string
+
+POST   /config/check_provider
+  Request:  { provider }
+  Response: (empty)
+
+GET    /config/provider-catalog
+  Query:    format (optional)
+  Response: [{ id, name, env_var, api_url, doc_url, format, model_count }]
+
+GET    /config/provider-catalog/{id}
+  Response: { id, name, env_var, api_url, doc_url, format, supports_streaming,
+              models: [{ id, name, context_limit, deprecated, capabilities }] }
+
+POST   /config/canonical-model-info
+  Request:  { provider, model }
+  Response: { source, model_info?: { provider, model, context_limit, currency,
+              input_token_cost?, output_token_cost?, cache_read_token_cost?,
+              cache_write_token_cost?, max_output_tokens? } }
+
+GET    /config/extensions
+  Response: { extensions: [ExtensionEntry], warnings?: [string] }
+
+POST   /config/extensions
+  Request:  { name, enabled, config: ExtensionConfig }
+  Response: string
+
+DELETE /config/extensions/{name}
+  Response: string
+
+POST   /config/permissions
+  Request:  { tool_permissions: [{ tool_name, permission: PermissionLevel }] }
+  Response: string
+
+GET    /config/prompts
+  Response: { prompts: [{ name, description, default_content, is_customized, user_content? }] }
+
+GET    /config/prompts/{name}
+  Response: { name, content, default_content, is_customized }
+
+PUT    /config/prompts/{name}
+  Request:  { content }
+  Response: string
+
+DELETE /config/prompts/{name}
+  Response: string
+
+GET    /config/slash_commands
+  Query:    working_dir (optional)
+  Response: { commands: [{ command, help, command_type }] }
+
+GET    /config/custom-providers/{id}
+  Response: { config: DeclarativeProviderConfig, is_editable }
+
+POST   /config/custom-providers
+  Request:  {
+    display_name, engine, api_url, api_key, models: [string],
+    base_path?, headers?: map<string,string>, requires_auth?,
+    supports_streaming?, catalog_provider_id?
+  }
+  Response: { provider_name }
+
+PUT    /config/custom-providers/{id}
+  Request:  (same as POST /config/custom-providers)
+  Response: string
+
+DELETE /config/custom-providers/{id}
+  Response: string
+
+--------------------------------------------------------------------------------
+RECIPES
+--------------------------------------------------------------------------------
+GET    /recipes/list
+  Response: { manifests: [{ id, file_path, last_modified, recipe, slash_command?, schedule_cron? }] }
+
+POST   /recipes/parse
+  Request:  { content }
+  Response: { recipe }
+
+POST   /recipes/create
+  Request:  { session_id, author?: { contact?, metadata? } }
+  Response: { recipe?, error? }
+
+POST   /recipes/save
+  Request:  { recipe, id? }
+  Response: (empty)
+
+POST   /recipes/delete
+  Request:  { id }
+  Response: (empty)
+
+POST   /recipes/encode
+  Request:  { recipe }
+  Response: { deeplink }
+
+POST   /recipes/decode
+  Request:  { deeplink }
+  Response: { recipe }
+
+POST   /recipes/scan
+  Request:  { recipe }
+  Response: { has_security_warnings }
+
+POST   /recipes/to-yaml
+  Request:  { recipe }
+  Response: { yaml }
+
+POST   /recipes/schedule
+  Request:  { id, cron_schedule? }
+  Response: (empty)
+
+POST   /recipes/slash-command
+  Request:  { id, slash_command? }
+  Response: (empty)
+
+Recipe structure:
+{
+  "title": "string",
+  "description": "string",
+  "instructions": "string (optional)",
+  "prompt": "string (optional)",
+  "version": "string (optional)",
+  "activities": ["string"],
+  "author": { "contact": "string", "metadata": any },
+  "extensions": [ExtensionConfig],
+  "parameters": [{ "key", "description", "input_type", "requirement", "default?", "options?" }],
+  "settings": { "goose_provider?", "goose_model?", "temperature?", "max_turns?" },
+  "response": { "json_schema?" },
+  "retry": { "max_retries", "checks", "on_failure?", "timeout_seconds?", "on_failure_timeout_seconds?" },
+  "sub_recipes": [{ "name", "path", "description?", "values?", "sequential_when_repeated?" }]
+}
+
+--------------------------------------------------------------------------------
+SCHEDULE
+--------------------------------------------------------------------------------
+GET    /schedule/list
+  Response: { jobs: [ScheduledJob] }
+
+POST   /schedule/create
+  Request:  { id, cron, recipe }
+  Response: ScheduledJob { id, cron, source, last_run?, current_session_id?,
+                           currently_running?, paused?, process_start_time? }
+
+DELETE /schedule/delete/{id}
+  Response: (empty)
+
+PUT    /schedule/{id}
+  Request:  { cron }
+  Response: ScheduledJob
+
+GET    /schedule/{id}/inspect
+  Response: { sessionId?, processStartTime?, runningDurationSeconds? }
+
+POST   /schedule/{id}/pause
+  Response: (empty)
+
+POST   /schedule/{id}/unpause
+  Response: (empty)
+
+POST   /schedule/{id}/kill
+  Response: (empty)
+
+POST   /schedule/{id}/run_now
+  Response: { session_id }
+
+GET    /schedule/{id}/sessions
+  Query:    limit (optional)
+  Response: [{ id, name, createdAt, workingDir, messageCount, scheduleId?,
+               inputTokens?, outputTokens?, totalTokens?,
+               accumulatedInputTokens?, accumulatedOutputTokens?, accumulatedTotalTokens? }]
+
+--------------------------------------------------------------------------------
+SYSTEM / STATUS
+--------------------------------------------------------------------------------
+GET    /status
+  Response: string
+
+GET    /system_info
+  Response: { os, os_version, architecture, app_version, provider?, model?, enabled_extensions: [string] }
+
+GET    /diagnostics/{session_id}
+  Response: string (diagnostic report)
+
+--------------------------------------------------------------------------------
+TELEMETRY
+--------------------------------------------------------------------------------
+POST   /telemetry/event
+  Request:  { event_name, properties?: object }
+  Response: (empty)
+
+--------------------------------------------------------------------------------
+OAUTH CALLBACKS
+--------------------------------------------------------------------------------
+POST   /handle_openrouter
+  Response: { success, message }
+
+POST   /handle_nanogpt
+  Response: { success, message }
+
+POST   /handle_tetrate
+  Response: { success, message }
+
+--------------------------------------------------------------------------------
+TUNNEL
+--------------------------------------------------------------------------------
+POST   /tunnel/start
+  Response: { hostname, url, secret }
+
+================================================================================
+END OF REFERENCE
+================================================================================

@@ -204,7 +204,7 @@ extensions:
       display_name: Memory
       timeout: 300
       bundled: true
-      description: "For storing and retrieving formating preferences that might be present"
+      description: "For storing and retrieving formatting preferences that might be present"
 prompt: |
   Analyze the staged changes and any unpushed commits in the git repository {{git_repo_path}} to generate a comprehensive pull request description. Work autonomously without requesting additional information.
 

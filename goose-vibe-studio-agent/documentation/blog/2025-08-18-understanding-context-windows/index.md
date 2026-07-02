@@ -81,15 +81,15 @@ The [Memory extension](https://goose-docs.ai/docs/mcp/memory-mcp) stores importa
 
 **5. Subagents**
 
-[Subagents](https://goose-docs.ai/docs/guides/subagents) handle specific tasks in their own isolated sessions. This prevents your main conversation from getting cluttered with implementation details and tool outputs. You delegate work to subagents and only see the final results, keeping your primary context window clean and focused.
+[Subagents](https://goose-docs.ai/docs/guides/context-engineering/subagents) handle specific tasks in their own isolated sessions. This prevents your main conversation from getting cluttered with implementation details and tool outputs. You delegate work to subagents and only see the final results, keeping your primary context window clean and focused.
 
 **6. Short sessions**
 
 Keep individual sessions focused on specific tasks. When you complete a task or reach a natural stopping point, start a new session. This prevents context window bloat from accumulated conversation history and ensures your tokens are spent on current, relevant work.
 
-**7. Lead/worker model**
+**7. Planner model + focused execution**
 
-The [Lead/Worker model](https://goose-docs.ai/docs/tutorials/lead-worker) splits work between two models. The lead model handles high-level planning and decision-making, while the worker model executes the detailed implementation. This optimizes costs by using expensive models for strategic thinking and cheaper models for routine execution tasks.
+Use a dedicated [planner model](/docs/guides/context-engineering/creating-plans) for complex reasoning and keep your default model focused on execution. This gives you control over cost and quality while keeping model behavior explicit and predictable.
 
 ---
 

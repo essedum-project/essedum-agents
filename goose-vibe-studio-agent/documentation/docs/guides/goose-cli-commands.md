@@ -1,5 +1,5 @@
 ---
-sidebar_position: 35
+sidebar_position: 7
 title: CLI Commands
 sidebar_label: CLI Commands
 toc_max_heading_level: 4
@@ -104,7 +104,7 @@ Once installed, you can:
 - Discover options without checking `--help`
 
 **Arguments:**
-- **`<SHELL>`**: The shell to generate completions for. Supported shells: `bash`, `elvish`, `fish`, `powershell`, `zsh`
+- **`<SHELL>`**: The shell to generate completions for. Supported shells: `bash`, `elvish`, `fish`, `nu`, `powershell`, `zsh`
 
 **Usage:**
 ```bash
@@ -112,6 +112,7 @@ Once installed, you can:
 goose completion bash
 goose completion zsh
 goose completion fish
+goose completion nu
 ```
 
 **Installation by Shell:**
@@ -152,6 +153,20 @@ goose completion fish > ~/.config/fish/completions/goose.fish
 ```
 
 Then restart your terminal or run `exec fish`.
+
+</TabItem>
+<TabItem value="nu" label="Nushell">
+
+```nu
+let autoload_dir = ($nu.user-autoload-dirs | first)
+mkdir $autoload_dir
+goose completion nu | save --force ($autoload_dir | path join "goose.nu")
+```
+
+Then restart Nushell or run:
+```nu
+source (($nu.user-autoload-dirs | first) | path join "goose.nu")
+```
 
 </TabItem>
 <TabItem value="powershell" label="PowerShell">
@@ -336,13 +351,13 @@ goose session export --path ./my-session.jsonl -o exported.md
 ---
 
 #### session diagnostics [options]
-Generate a comprehensive diagnostics bundle for troubleshooting issues with a specific session.
+Generate a comprehensive diagnostics JSON report for troubleshooting issues with a specific session.
 
 **Options:**
 - **`--session-id <session_id>`**: Generate diagnostics for a specific session by ID
 - **`-n, --name <name>`**: Generate diagnostics for a specific session by name
 - **`--path <path>`**: Generate diagnostics for a specific session by file path (legacy)
-- **`-o, --output <file>`**: Save diagnostics bundle to a specific file path (default: `diagnostics_{session_id}.zip`)
+- **`-o, --output <file>`**: Save diagnostics report to a specific file path (default: `diagnostics_{session_id}.json`)
 
 **What's included:**
 - **System Information**: App version, operating system, architecture, and timestamp
@@ -359,18 +374,18 @@ goose session diagnostics --session-id 20251108_5
 goose session diagnostics -n my-project-session
 
 # Save diagnostics to a custom location
-goose session diagnostics --session-id 20251108_5 -o /path/to/my-diagnostics.zip
+goose session diagnostics --session-id 20251108_5 -o /path/to/my-diagnostics.json
 
 # Interactive selection (prompts you to choose a session)
 goose session diagnostics
 ```
 
 :::warning Privacy Notice
-Diagnostics bundles contain your session messages and system information. If your session includes sensitive data (API keys, personal information, proprietary code), review the contents before sharing publicly.
+Diagnostics reports contain your session messages and system information. If your session includes sensitive data (API keys, personal information, proprietary code), review the contents before sharing publicly.
 :::
 
 :::tip
-Generate diagnostics before reporting bugs to provide technical details that help with faster resolution. The ZIP file can be attached to GitHub issues or shared with support.
+Generate diagnostics before reporting bugs to provide technical details that help with faster resolution. The JSON file can be attached to GitHub issues or shared with support.
 :::
 
 ---
@@ -444,16 +459,6 @@ goose run --recipe recipe.yaml --max-turns 10
 
 ---
 
-#### bench
-Used to evaluate system-configuration across a range of practical tasks. See the [detailed guide](/docs/tutorials/benchmarking) for more information.
-
-**Usage:**
-```bash
-goose bench ...etc.
-```
-
----
-
 #### recipe
 Used to validate recipe files, manage recipe sharing, list available recipes, and open recipes in goose desktop.
 
@@ -499,6 +504,30 @@ goose recipe validate my-recipe.yaml
 # Get help about recipe commands
 goose recipe help
 ```
+
+---
+
+#### plugin
+Install and update git-backed plugins that provide skills or other Open Plugins components.
+
+**Commands:**
+- **`install [OPTIONS] <URL>`**: Install a plugin from a git repository URL
+  - **`--auto-update`**: Automatically check for updates before plugin skills are loaded
+- **`update <NAME>`**: Update an installed git-backed plugin by name
+
+**Usage:**
+```bash
+# Install a plugin from a git repository
+goose plugin install https://github.com/example/my-goose-plugin.git
+
+# Install a plugin and enable automatic update checks
+goose plugin install --auto-update https://github.com/example/my-goose-plugin.git
+
+# Update an installed plugin manually
+goose plugin update my-plugin
+```
+
+Installed plugins are stored under `~/.agents/plugins/<plugin-name>/`. For more about plugin-provided skills, hooks, and update behavior, see the [Plugins guide](/docs/guides/context-engineering/plugins).
 
 ---
 
@@ -628,6 +657,7 @@ Once you're in an interactive session (via `goose session` or `goose run --inter
 - **`/recipe [filepath]`** - Generate a recipe from the current conversation and save it to the specified filepath (must end with .yaml). If no filepath is provided, it will be saved to ./recipe.yaml
 - **`/compact`** - Compact and summarize the current conversation to reduce context length while preserving key information
 - **`/r`** - Toggle full tool output display (show complete tool parameters without truncation)
+- **`/skills`** - List available skills
 - **`/t`** - Toggle between `light`, `dark`, and `ansi` themes. [More info](#themes).
 - **`/t <name>`** - Set theme directly (light, dark, ansi)
 

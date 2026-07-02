@@ -44,6 +44,9 @@ export const configLabels: Record<string, string> = {
   // ollama
   OLLAMA_HOST: 'Ollama Host',
 
+  // ollama cloud
+  OLLAMA_CLOUD_API_KEY: 'Ollama Cloud API Key',
+
   // azure openai
   AZURE_OPENAI_API_KEY: 'Azure OpenAI API Key',
   AZURE_OPENAI_ENDPOINT: 'Azure OpenAI Endpoint',
@@ -76,6 +79,7 @@ export const providerPrefixes: Record<string, string[]> = {
   google: ['GOOGLE_'],
   groq: ['GROQ_'],
   databricks: ['DATABRICKS_'],
+  databricks_v2: ['DATABRICKS_'],
   openrouter: ['OPENROUTER_'],
   ollama: ['OLLAMA_'],
   azure_openai: ['AZURE_'],
