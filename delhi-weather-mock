@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Delhi Weather Mock</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; max-width: 800px; margin: 0 auto; padding: 20px; background-color: #f5f5f5; }
+        .container { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { color: #2c3e50; text-align: center; }
+        .weather-card { display: flex; flex-direction: column; align-items: center; margin-top: 10px; }
+        .weather-data { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; text-align: center; }
+        .metric { background: #f8f9fa; padding: 8px 12px; border-radius: 4px; font-weight: bold; }
+        button { background-color: #4CAF50; color: white; padding: 10px 20px; border: none; cursor: pointer; border-radius: 4px; font-size: 16px; margin-top: 10px; transition: background-color 0.3s; }
+        button:hover { background-color: #45a049; }
+        .condition { font-size: 18px; font-weight: bold; color: #2c3e50; }
+        @media (max-width: 600px) { .weather-data { grid-template-columns: 1fr; } }
+    </style>
+  
+  
+  <script type="application/ld+json">
+{
+  "@context": "urn:goose.ai:schema",
+  "@type": "GooseApp",
+  "name": "delhi-weather-mock",
+  "description": "A mock weather tracker for Delhi displaying real-time simulated temperature, humidity, and conditions with 5s refreshes.",
+  "width": 800,
+  "height": 600,
+  "resizable": true,
+  "mcpServers": [
+    "apps"
+  ]
+}
+  </script>
+</head>
+<body>
+    <div class="container">
+        <h1>Delhi Weather Mock</h1>
+        <div class="weather-card">
+            <div class="weather-data">
+                <div class="metric">Current Temperature: <span id="temp">25°C</span></div>
+                <div class="metric">Humidity: <span id="humidity">65%</span></div>
+                <div class="condition" id="condition">Sunny</div>
+            </div>
+            <button id="refresh-btn">Refresh Weather</button>
+        </div>
+    </div>
+
+    <script>
+        function generateWeather() {
+            const minTemp = 15;
+            const maxTemp = 40;
+            const minHumidity = 30;
+            const maxHumidity = 90;
+            
+            const temp = Math.round(Math.random() * (maxTemp - minTemp) + minTemp);
+            const humidity = Math.round(Math.random() * (maxHumidity - minHumidity) + minHumidity);
+            
+            let condition;
+            if (temp < 20) {
+                condition = 'Cloudy';
+            } else if (temp < 25) {
+                condition = 'Sunny';
+            } else if (temp < 30) {
+                condition = 'Partly Cloudy';
+            } else if (temp < 35) {
+                condition = 'Rainy';
+            } else {
+                condition = 'Snowy';
+            }
+            
+            return { temp, humidity, condition };
+        }
+
+        function updateWeather() {
+            const weather = generateWeather();
+            document.getElementById('temp').textContent = `${weather.temp}°C`;
+            document.getElementById('humidity').textContent = `${weather.humidity}%`;
+            document.getElementById('condition').textContent = weather.condition;
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            setInterval(updateWeather, 5000);
+            updateWeather();
+            const refreshBtn = document.getElementById('refresh-btn');
+            refreshBtn.addEventListener('click', updateWeather);
+        });
+    </script>
+</body>
+</html>
