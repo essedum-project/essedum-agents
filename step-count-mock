@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Step Count Mock</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            margin: 0;
+            padding: 20px;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        header {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        h1 {
+            font-size: 2rem;
+        }
+        #step-counter {
+            font-size: 2rem;
+            font-weight: bold;
+            margin: 10px 0;
+            text-align: center;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 1rem;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            display: block;
+            margin: 10px auto;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        ul {
+            list-style: none;
+            padding: 0;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        li {
+            border-bottom: 1px solid #ccc;
+            padding: 5px 0;
+            margin: 5px 0;
+            text-align: center;
+        }
+        @media (max-width: 600px) {
+            #step-counter {
+                font-size: 1.5rem;
+            }
+            button {
+                padding: 8px 15px;
+                font-size: 0.95rem;
+            }
+        }
+    </style>
+  
+  
+  <script type="application/ld+json">
+{
+  "@context": "urn:goose.ai:schema",
+  "@type": "GooseApp",
+  "name": "step-count-mock",
+  "description": "A simple step tracker with mock data for demonstration.",
+  "width": 800,
+  "height": 600,
+  "resizable": true,
+  "mcpServers": [
+    "apps"
+  ]
+}
+  </script>
+</head>
+<body>
+    <header>
+        <h1>Step Counter</h1>
+    </header>
+    <main>
+        <div id="step-counter">Current Steps: 0</div>
+        <button id="add-steps">Add 100 Steps</button>
+        <ul id="step-history">
+            <li>Mock step: 0 steps</li>
+            <li>Mock step: 100 steps</li>
+            <li>Mock step: 200 steps</li>
+        </ul>
+    </main>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            let totalSteps = 0;
+            const stepCounter = document.getElementById('step-counter');
+            const addStepsButton = document.getElementById('add-steps');
+            const stepHistory = document.getElementById('step-history');
+
+            addStepsButton.addEventListener('click', function() {
+                totalSteps += 100;
+                stepCounter.textContent = `Current Steps: ${totalSteps}`;
+                
+                const stepEntry = document.createElement('li');
+                stepEntry.textContent = `Added 100 steps. Total: ${totalSteps}`;
+                stepHistory.appendChild(stepEntry);
+            });
+
+            // Initial mock data - 3 entries
+        });
+    </script>
+</body>
+</html>
