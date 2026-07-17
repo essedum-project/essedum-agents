@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Weather Checker</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: #f5f5f5;
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+        #citySearch {
+            width: 100%;
+            padding: 10px;
+            margin: 10px 0;
+            font-size: 16px;
+            box-sizing: border-box;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        #weatherDisplay {
+            display: none;
+            margin-top: 20px;
+            padding: 15px;
+            background-color: white;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+        }
+        #weatherDisplay p {
+            margin: 5px 0;
+            font-size: 16px;
+        }
+        .error {
+            color: #e74c3c;
+            font-weight: bold;
+            margin-top: 5px;
+        }
+    </style>
+  
+  
+  <script type="application/ld+json">
+{
+  "@context": "urn:goose.ai:schema",
+  "@type": "GooseApp",
+  "name": "weather-checker",
+  "description": "A mock weather app displaying city temperature and humidity with search functionality.",
+  "width": 800,
+  "height": 600,
+  "resizable": true,
+  "mcpServers": [
+    "apps"
+  ]
+}
+  </script>
+</head>
+<body>
+    <h1>Weather Checker</h1>
+    <input type="text" id="citySearch" placeholder="Search city...">
+    <div id="weatherDisplay">
+        <p>Temperature: <span id="temp">-</span>°C</p>
+        <p>Humidity: <span id="humidity">-</span>%</p>
+    </div>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const mockCities = {
+                london: { temp: 15, humidity: 60 },
+                paris: { temp: 12, humidity: 55 }
+            };
+
+            const citySearch = document.getElementById('citySearch');
+            const weatherDisplay = document.getElementById('weatherDisplay');
+
+            citySearch.addEventListener('input', function() {
+                const city = this.value.toLowerCase().trim();
+                if (mockCities[city]) {
+                    weatherDisplay.innerHTML = `
+                        <p>Temperature: <span id="temp">${mockCities[city].temp}</span>°C</p>
+                        <p>Humidity: <span id="humidity">${mockCities[city].humidity}</span>%</p>
+                    `;
+                    weatherDisplay.style.display = 'block';
+                } else {
+                    weatherDisplay.style.display = 'block';
+                    weatherDisplay.innerHTML = '<p class="error">City not found.</p>';
+                }
+            });
+
+            // Optional: Add a default city to test
+            setTimeout(() => {
+                citySearch.value = 'London';
+                citySearch.dispatchEvent(new Event('input'));
+            }, 100);
+        });
+    </script>
+</body>
+</html>

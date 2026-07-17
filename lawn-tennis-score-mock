@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lawn Tennis Score Checker</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+      line-height: 1.6;
+    }
+    .container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 10px;
+    }
+    h1 {
+      color: #2c3e50;
+      margin-bottom: 20px;
+    }
+    .score-board {
+      display: flex;
+      justify-content: space-around;
+      width: 100%;
+      margin: 20px 0;
+    }
+    .player {
+      text-align: center;
+      border: 1px solid #e0e0e0;
+      padding: 12px;
+      min-width: 120px;
+      border-radius: 8px;
+      background-color: #f9f9f9;
+    }
+    .score-display {
+      font-size: 24px;
+      font-weight: bold;
+      color: #333;
+    }
+    button {
+      padding: 10px 15px;
+      margin: 5px;
+      background-color: #4a90e2;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 16px;
+      transition: background-color 0.2s;
+    }
+    button:hover {
+      background-color: #3a7bc8;
+    }
+  </style>
+  
+  
+  <script type="application/ld+json">
+{
+  "@context": "urn:goose.ai:schema",
+  "@type": "GooseApp",
+  "name": "lawn-tennis-score-mock",
+  "description": "A simple mock lawn tennis score checker that tracks points for two players.",
+  "width": 800,
+  "height": 600,
+  "resizable": true,
+  "mcpServers": [
+    "apps"
+  ]
+}
+  </script>
+</head>
+<body>
+  <div class="container">
+    <h1>Lawn Tennis Score Checker</h1>
+    <div class="score-board">
+      <div class="player">
+        <h3>Player 1</h3>
+        <div class="score-display" id="player1-score">0</div>
+      </div>
+      <div class="player">
+        <h3>Player 2</h3>
+        <div class="score-display" id="player2-score">0</div>
+      </div>
+    </div>
+    <button onclick="addPointToPlayer1()">Player 1 +1</button>
+    <button onclick="addPointToPlayer2()">Player 2 +1</button>
+  </div>
+
+  <script>
+    function addPointToPlayer1() {
+      const currentScore = parseInt(document.getElementById('player1-score').textContent, 10) || 0;
+      document.getElementById('player1-score').textContent = currentScore + 1;
+    }
+    
+    function addPointToPlayer2() {
+      const currentScore = parseInt(document.getElementById('player2-score').textContent, 10) || 0;
+      document.getElementById('player2-score').textContent = currentScore + 1;
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chess Score Tracker</title>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            margin: 0;
+            padding: 20px;
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: #f5f5f5;
+            color: #333;
+        }
+        header {
+            text-align: center;
+            margin-bottom: 1rem;
+        }
+        main {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+        #score-display {
+            font-size: 1.5rem;
+            font-weight: bold;
+            text-align: center;
+            padding: 10px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        #move-history {
+            padding: 10px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        #score-progress {
+            padding: 10px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 0.5rem 1rem;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 1rem;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:active {
+            background-color: #3c8c3d;
+        }
+        h1 {
+            text-align: center;
+        }
+        .footer {
+            text-align: center;
+            margin-top: 1rem;
+        }
+    </style>
+  
+  
+  <script type="application/ld+json">
+{
+  "@context": "urn:goose.ai:schema",
+  "@type": "GooseApp",
+  "name": "chess-score-tracker-mock",
+  "description": "Chess score tracker with mock game data and generate buttons for testing.",
+  "width": 800,
+  "height": 600,
+  "resizable": true,
+  "mcpServers": [
+    "apps"
+  ]
+}
+  </script>
+</head>
+<body>
+    <header>
+        <h1>Chess Score Tracker</h1>
+    </header>
+    <main>
+        <div id="score-display">Score: 0-0</div>
+        <div id="move-history">Move History: <span id="history-list"></span></div>
+        <div id="score-progress">Score Progression: <span id="progress-text"></span></div>
+    </main>
+    <footer class="footer">
+        <button id="generate-data">Generate Mock Data (5 moves)</button>
+    </footer>
+    <script>
+        // Initialize score and moves
+        let score = { playerA: 0, playerB: 0 };
+        let moves = [];
+
+        function generateMockData() {
+            try {
+                for (let i = 0; i < 5; i++) {
+                    const randomPlayer = Math.floor(Math.random() * 2);
+                    const moveText = `Move ${i + 1}: Player ${randomPlayer === 0 ? 'A' : 'B'}`;
+                    moves.push(moveText);
+
+                    if (randomPlayer === 0) {
+                        score.playerA++;
+                    } else {
+                        score.playerB++;
+                    }
+                }
+                updateScoreDisplay();
+                updateMoveHistory();
+                updateScoreProgress();
+            } catch (error) {
+                console.error('Error generating mock data:', error);
+                alert('An error occurred while generating mock data. Please try again.');
+            }
+        }
+
+        function updateScoreDisplay() {
+            document.getElementById('score-display').textContent = `Score: ${score.playerA}-${score.playerB}`;
+        }
+
+        function updateMoveHistory() {
+            const historyList = document.getElementById('history-list');
+            historyList.textContent = moves.join('\n');
+        }
+
+        function updateScoreProgress() {
+            const progressText = document.getElementById('progress-text');
+            progressText.textContent = `Current Score: Player A (${score.playerA}), Player B (${score.playerB})`;
+        }
+
+        // Initial update
+        updateScoreDisplay();
+        updateMoveHistory();
+        updateScoreProgress();
+
+        // Event listener for generate button
+        document.getElementById('generate-data').addEventListener('click', generateMockData);
+    </script>
+</body>
+</html>
