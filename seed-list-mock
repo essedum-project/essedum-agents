@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Seed List Mock</title>
+  <style>
+    body { font-family: Arial, sans-serif; line-height: 1.6; margin: 0; padding: 20px; }
+    .container { max-width: 800px; margin: 0 auto; }
+    h1 { text-align: center; }
+    ul { list-style-type: none; padding: 0; }
+    li { padding: 10px; margin-bottom: 5px; border-bottom: 1px solid #ddd; }
+    li:last-child { border-bottom: none; }
+  </style>
+  
+  
+  <script type="application/ld+json">
+{
+  "@context": "urn:goose.ai:schema",
+  "@type": "GooseApp",
+  "name": "seed-list-mock",
+  "description": "Mock seed list with names and descriptions for demo purposes.",
+  "width": 800,
+  "height": 600,
+  "resizable": true,
+  "mcpServers": [
+    "apps"
+  ]
+}
+  </script>
+</head>
+<body>
+  <div class="container">
+    <h1>Seed List</h1>
+    <ul id="seed-list"></ul>
+  </div>
+
+  <script>
+    const seeds = [
+      { name: 'Sunflower', description: 'A versatile seed for gardens and cooking.' },
+      { name: 'Wheat', description: 'Commonly used in bread and pastries.' },
+      { name: 'Beans', description: 'High in protein and fiber.' },
+      { name: 'Corn', description: 'Grown worldwide for food and feed.' },
+      { name: 'Soybeans', description: 'Rich in protein and used in many dishes.' }
+    ];
+
+    try {
+      const seedList = document.getElementById('seed-list');
+      seeds.forEach(seed => {
+        const li = document.createElement('li');
+        li.innerHTML = `<strong>${seed.name}</strong>: ${seed.description}`;
+        seedList.appendChild(li);
+      });
+    } catch (error) {
+      console.error('Error loading seed list:', error);
+    }
+  </script>
+</body>
+</html>

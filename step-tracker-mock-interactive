@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Step Tracker Mock</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f8f9fa;
+        }
+        header {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        h1 {
+            color: #2c3e50;
+        }
+        main {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        #steps-list {
+            list-style-type: none;
+            padding: 0;
+        }
+        #steps-list li {
+            padding: 8px;
+            border-bottom: 1px solid #ddd;
+            margin: 0;
+        }
+        #step-form {
+            display: flex;
+            gap: 10px;
+        }
+        #step-form input {
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        #step-form button {
+            padding: 8px 12px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        #error-message {
+            color: red;
+            font-size: 0.8em;
+            text-align: center;
+            margin-top: 5px;
+            display: none;
+        }
+        #step-form button:hover {
+            background-color: #45a049;
+        }
+    </style>
+  
+  
+  <script type="application/ld+json">
+{
+  "@context": "urn:goose.ai:schema",
+  "@type": "GooseApp",
+  "name": "step-tracker-mock-interactive",
+  "description": "Displays 5 mock steps with a form to add new steps for demonstration",
+  "width": 800,
+  "height": 600,
+  "resizable": true,
+  "mcpServers": [
+    "apps"
+  ]
+}
+  </script>
+</head>
+<body>
+    <header>
+        <h1>Step Tracker</h1>
+    </header>
+    <main>
+        <h2>Current Steps</h2>
+        <ul id="steps-list">
+            <li>Complete task</li>
+            <li>Review results</li>
+            <li>Check notes</li>
+            <li>Update settings</li>
+            <li>Finish daily</li>
+        </ul>
+        <form id="step-form">
+            <input type="text" id="step-input" placeholder="Enter a new step...">
+            <button type="submit">Add Step</button>
+        </form>
+        <div id="error-message" class="error-message" style="display:none;">Please enter a step.</div>
+    </main>
+    <script>
+        document.getElementById('step-form').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const input = document.getElementById('step-input');
+            const step = input.value.trim();
+            if (step === '') {
+                document.getElementById('error-message').style.display = 'block';
+                input.focus();
+            } else {
+                const stepsList = document.getElementById('steps-list');
+                const li = document.createElement('li');
+                li.textContent = step;
+                stepsList.appendChild(li);
+                input.value = '';
+            }
+        });
+    </script>
+</body>
+</html>

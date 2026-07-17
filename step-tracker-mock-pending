@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Step Tracker</title>
+    <style>
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            color: #333;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+        }
+        .step-list {
+            list-style-type: none;
+            padding: 0;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .step-list li {
+            display: flex;
+            align-items: center;
+            padding: 8px 12px;
+            border-bottom: 1px solid #eee;
+        }
+        .step-list li:last-child {
+            border-bottom: none;
+        }
+        .step-list li input {
+            margin-right: 10px;
+            width: 20px;
+            height: 20px;
+        }
+        .step-list li span {
+            flex: 1;
+        }
+        .counter {
+            font-weight: bold;
+            color: #2d3748;
+            padding: 10px;
+            background-color: #f8f9fa;
+            border-radius: 8px;
+            min-width: 150px;
+            text-align: center;
+        }
+        .buttons {
+            display: flex;
+            gap: 15px;
+            margin-top: 10px;
+        }
+        button {
+            padding: 8px 15px;
+            font-size: 14px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            background-color: #4CAF50;
+            color: white;
+            transition: background-color 0.2s;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button.reset {
+            background-color: #f44336;
+        }
+        button.reset:hover {
+            background-color: #d32f2f;
+        }
+        button.add {
+            background-color: #2196F3;
+        }
+        button.add:hover {
+            background-color: #0d84c8;
+        }
+    </style>
+  
+  
+  <script type="application/ld+json">
+{
+  "@context": "urn:goose.ai:schema",
+  "@type": "GooseApp",
+  "name": "step-tracker-mock-pending",
+  "description": "Step tracker with mock data showing 5 completed and 2 pending steps.",
+  "width": 800,
+  "height": 600,
+  "resizable": false,
+  "mcpServers": [
+    "apps"
+  ]
+}
+  </script>
+</head>
+<body>
+    <div class="container">
+        <h1>Step Tracker</h1>
+        <ul class="step-list" id="stepList">
+        </ul>
+        <div class="counter" id="totalSteps">Total Steps: 7</div>
+        <div class="buttons">
+            <button type="button" class="add" id="addButton">Add Steps</button>
+            <button type="button" class="reset" id="resetButton">Reset</button>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            // Mock initial data: 5 completed, 2 pending
+            const initialSteps = [
+                { id: 1, completed: true },
+                { id: 2, completed: true },
+                { id: 3, completed: true },
+                { id: 4, completed: true },
+                { id: 5, completed: true },
+                { id: 6, completed: false },
+                { id: 7, completed: false }
+            ];
+
+            // DOM elements
+            const stepList = document.getElementById('stepList');
+            const totalSteps = document.getElementById('totalSteps');
+            const addButton = document.getElementById('addButton');
+            const resetButton = document.getElementById('resetButton');
+
+            // Render initial steps
+            function renderSteps(stepsArray) {
+                stepList.innerHTML = '';
+                stepsArray.forEach(step => {
+                    const listItem = document.createElement('li');
+                    listItem.innerHTML = `<input type="checkbox" ${step.completed ? 'checked' : ''}> <span>Step ${step.id}</span>`;
+                    stepList.appendChild(listItem);
+                });
+            }
+
+            // Update total steps counter
+            function updateTotalSteps() {
+                const total = document.querySelectorAll('ul.step-list li').length;
+                totalSteps.textContent = `Total Steps: ${total}`;
+            }
+
+            // Handle add button click: add 3 new pending steps
+            addButton.addEventListener('click', () => {
+                const newSteps = [
+                    { id: 8, completed: false },
+                    { id: 9, completed: false },
+                    { id: 10, completed: false }
+                ];
+                initialSteps.push(...newSteps);
+                renderSteps(initialSteps);
+                updateTotalSteps();
+            });
+
+            // Handle reset button click
+            resetButton.addEventListener('click', () => {
+                initialSteps.length = 0;
+                initialSteps.push(...[
+                    { id: 1, completed: true },
+                    { id: 2, completed: true },
+                    { id: 3, completed: true },
+                    { id: 4, completed: true },
+                    { id: 5, completed: true },
+                    { id: 6, completed: false },
+                    { id: 7, completed: false }
+                ]);
+                renderSteps(initialSteps);
+                updateTotalSteps();
+            });
+
+            // Initial render
+            renderSteps(initialSteps);
+            updateTotalSteps();
+        });
+    </script>
+</body>
+</html>
