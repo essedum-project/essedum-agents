@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mock Dictionary</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      line-height: 1.6;
+      color: #333;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+      background-color: #f5f5f5;
+    }
+    header {
+      text-align: center;
+      margin-bottom: 20px;
+    }
+    h1 {
+      color: #2c3e50;
+    }
+    .search-container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      margin-bottom: 20px;
+    }
+    input {
+      padding: 10px;
+      border: 2px solid #ccc;
+      border-radius: 4px;
+      width: 70%;
+      max-width: 500px;
+      font-size: 16px;
+    }
+    input:focus {
+      outline: none;
+      border-color: #3498db;
+    }
+    #results {
+      padding: 15px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      background-color: #fff;
+      margin-top: 10px;
+    }
+    #results p {
+      margin: 5px 0;
+    }
+    #results em {
+      color: #e74c3c;
+      font-weight: bold;
+    }
+  </style>
+  
+  
+  <script type="application/ld+json">
+{
+  "@context": "urn:goose.ai:schema",
+  "@type": "GooseApp",
+  "name": "dictionary-mock",
+  "description": "A mock dictionary app providing fake word definitions for testing.",
+  "width": 800,
+  "height": 600,
+  "resizable": false,
+  "mcpServers": [
+    "apps"
+  ]
+}
+  </script>
+</head>
+<body>
+  <header>
+    <h1>Mock Dictionary</h1>
+  </header>
+  <main>
+    <section class="search-container">
+      <input type="text" id="searchWord" placeholder="Enter a word...">
+      <div id="results"></div>
+    </section>
+  </main>
+
+  <script>
+    const mockDictionary = {
+      'apple': 'A round, red fruit with juicy flesh.',
+      'car': 'A four-wheeled vehicle used for transportation.',
+      'dog': 'A domesticated mammal, often kept as a pet.',
+      'tree': 'A plant with a trunk and branches.',
+      'book': 'A collection of pages for reading or writing.'
+    };
+
+    document.getElementById('searchWord').addEventListener('input', function(event) {
+      const searchTerm = event.target.value.toLowerCase();
+      const resultsDiv = document.getElementById('results');
+      resultsDiv.innerHTML = '';
+
+      if (searchTerm.length > 0) {
+        if (mockDictionary[searchTerm]) {
+          resultsDiv.innerHTML = `<p><strong>${searchTerm}</strong>: ${mockDictionary[searchTerm]}</p>`;
+        } else {
+          resultsDiv.innerHTML = `<p>The word <em>${searchTerm}</em> was not found in the mock dictionary.</p>`;
+        }
+      }
+    });
+  </script>
+</body>
+</html>
