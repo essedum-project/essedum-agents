@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Canteen Foosball Score Tracker</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f7f7f7;
+            color: #333;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            text-align: center;
+            color: #2c3e50;
+        }
+        .team {
+            display: flex;
+            justify-content: space-around;
+            margin: 15px 0;
+        }
+        .team-name {
+            font-weight: bold;
+            color: #2c3e50;
+        }
+        .score {
+            font-size: 24px;
+            font-weight: bold;
+            color: #3498db;
+        }
+        .button-container {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 10px;
+        }
+        button {
+            padding: 8px 15px;
+            font-size: 14px;
+            background-color: #e8f4f8;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #d1e8f5;
+        }
+        .start-button {
+            background-color: #3498db;
+            color: white;
+            font-weight: bold;
+        }
+        .start-button:hover {
+            background-color: #2980b9;
+        }
+        .message {
+            text-align: center;
+            color: #7f8c8d;
+            margin-top: 10px;
+            font-size: 12px;
+        }
+    </style>
+  
+  
+  <script type="application/ld+json">
+{
+  "@context": "urn:goose.ai:schema",
+  "@type": "GooseApp",
+  "name": "canteen-foosball-score-mock",
+  "description": "Real-time score tracker for canteen foosball with mock data generation and score increment buttons.",
+  "width": 800,
+  "height": 600,
+  "resizable": false,
+  "mcpServers": [
+    "apps"
+  ]
+}
+  </script>
+</head>
+<body>
+    <div class="container">
+        <h1>Canteen Foosball Score Tracker</h1>
+        <div class="team">
+            <span class="team-name">Team A</span>
+            <span class="score" id="score-a">0</span>
+        </div>
+        <div class="team">
+            <span class="team-name">Team B</span>
+            <span class="score" id="score-b">0</span>
+        </div>
+        <div class="button-container">
+            <button class="start-button" id="start-game">Start Game</button>
+            <button id="increment-a">Team A +1</button>
+            <button id="increment-b">Team B +1</button>
+        </div>
+        <div class="message" id="message">Game starts with both teams at 0 points.</div>
+    </div>
+    
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const startButton = document.getElementById('start-game');
+            const incrementA = document.getElementById('increment-a');
+            const incrementB = document.getElementById('increment-b');
+            const scoreA = document.getElementById('score-a');
+            const scoreB = document.getElementById('score-b');
+            const message = document.getElementById('message');
+
+            let scores = { a: 0, b: 0 };
+
+            const updateScores = () => {
+                scoreA.textContent = scores.a;
+                scoreB.textContent = scores.b;
+            };
+
+            incrementA.addEventListener('click', () => {
+                scores.a++;
+                updateScores();
+                message.textContent = `Team A score updated to ${scores.a} - Team B: ${scores.b}`;
+            });
+
+            incrementB.addEventListener('click', () => {
+                scores.b++;
+                updateScores();
+                message.textContent = `Team B score updated to ${scores.b} - Team A: ${scores.a}`;
+            });
+
+            startButton.addEventListener('click', () => {
+                if (scores.a > 0 || scores.b > 0) {
+                    alert("Game already started! Scores cannot be reset.");
+                } else {
+                    message.textContent = "Game started! Click buttons to increment scores.";
+                    setTimeout(() => {
+                        scores.a = 1;
+                        scores.b = 2;
+                        updateScores();
+                        message.textContent = "Mock game data loaded: Team A 1 - Team B 2";
+                    }, 1000);
+                }
+            });
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Table Tennis Score Tracker</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        h1 {
+            text-align: center;
+            color: #2c3e50;
+        }
+        #score-display {
+            text-align: center;
+            margin: 20px 0;
+        }
+        #score-display p {
+            margin: 5px 0;
+            font-size: 24px;
+            font-weight: bold;
+        }
+        #controls {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        #controls button {
+            padding: 8px 15px;
+            font-size: 16px;
+            background-color: #4a90e2;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        #controls button:hover {
+            background-color: #357a9c;
+        }
+        #game-result {
+            text-align: center;
+            padding: 10px;
+            font-size: 18px;
+            color: #e74c3c;
+            display: none;
+        }
+    </style>
+  
+  
+  <script type="application/ld+json">
+{
+  "@context": "urn:goose.ai:schema",
+  "@type": "GooseApp",
+  "name": "table-tennis-score-tracker-mock",
+  "description": "Track live table tennis scores between two players. Match ends at 11 points with 2-point lead.",
+  "width": 800,
+  "height": 600,
+  "resizable": true,
+  "mcpServers": [
+    "apps"
+  ]
+}
+  </script>
+</head>
+<body>
+    <h1>Table Tennis Score Tracker</h1>
+    <div id="score-display">
+        <p>Player A: <span id="a-score">12</span></p>
+        <p>Player B: <span id="b-score">9</span></p>
+    </div>
+    <div id="controls">
+        <button id="reset-btn">Reset Score</button>
+        <button id="add-a-btn">Add Point to A</button>
+        <button id="add-b-btn">Add Point to B</button>
+    </div>
+    <div id="game-result"></div>
+    <script>
+        let aScore = 12;
+        let bScore = 9;
+
+        function updateDisplay() {
+            document.getElementById('a-score').textContent = aScore;
+            document.getElementById('b-score').textContent = bScore;
+        }
+
+        function resetScore() {
+            aScore = 0;
+            bScore = 0;
+            updateDisplay();
+            document.getElementById('game-result').style.display = 'none';
+        }
+
+        function addPointA() {
+            aScore++;
+            updateDisplay();
+            checkEndGame();
+        }
+
+        function addPointB() {
+            bScore++;
+            updateDisplay();
+            checkEndGame();
+        }
+
+        function checkEndGame() {
+            if (aScore >= 11 && aScore - bScore >= 2) {
+                document.getElementById('game-result').textContent = 'Player A wins!';
+                document.getElementById('game-result').style.display = 'block';
+            } else if (bScore >= 11 && bScore - aScore >= 2) {
+                document.getElementById('game-result').textContent = 'Player B wins!';
+                document.getElementById('game-result').style.display = 'block';
+            }
+        }
+
+        document.getElementById('reset-btn').addEventListener('click', resetScore);
+        document.getElementById('add-a-btn').addEventListener('click', addPointA);
+        document.getElementById('add-b-btn').addEventListener('click', addPointB);
+
+        updateDisplay();
+    </script>
+</body>
+</html>

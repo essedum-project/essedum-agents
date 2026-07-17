@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Step Simulator</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f9f9f9;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #2c3e50;
+            text-align: center;
+            margin-bottom: 15px;
+        }
+        .stats {
+            display: flex;
+            justify-content: space-around;
+            margin: 15px 0;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 5px;
+        }
+        .stat {
+            text-align: center;
+            padding: 8px 12px;
+            background: #eef7ff;
+            border-radius: 5px;
+            flex: 1;
+        }
+        .chart-container {
+            width: 100%;
+            height: 280px;
+            margin-top: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            position: relative;
+        }
+        canvas {
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+  
+  
+  <script type="application/ld+json">
+{
+  "@context": "urn:goose.ai:schema",
+  "@type": "GooseApp",
+  "name": "step-simulator",
+  "description": "Generates mock step data for testing with real-time dashboard and trends chart.",
+  "width": 800,
+  "height": 600,
+  "resizable": true,
+  "mcpServers": [
+    "apps"
+  ]
+}
+  </script>
+</head>
+<body>
+    <div class="container">
+        <h1>Step Tracker</h1>
+        <div class="stats">
+            <div class="stat">Current steps: <span id="current-steps">1500</span></div>
+            <div class="stat">Daily goal: <span id="daily-goal">10000</span></div>
+        </div>
+        <div class="chart-container">
+            <canvas id="step-chart"></canvas>
+        </div>
+    </div>
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            // Mock data for the line chart
+            const mockData = [
+                { time: '8:00', steps: 300 },
+                { time: '12:00', steps: 900 },
+                { time: '4:00', steps: 1500 },
+                { time: '8:00', steps: 2000 }
+            ];
+
+            const canvas = document.getElementById('step-chart');
+            const ctx = canvas.getContext('2d');
+            const width = canvas.width;
+            const height = canvas.height;
+
+            // Draw axes
+            ctx.fillStyle = '#f5f5f5';
+            ctx.fillRect(0, 0, width, height);
+
+            // X-axis (bottom)
+            ctx.strokeStyle = '#ccc';
+            ctx.beginPath();
+            ctx.moveTo(50, height - 20);
+            ctx.lineTo(width - 50, height - 20);
+            ctx.stroke();
+
+            // Y-axis (left)
+            ctx.beginPath();
+            ctx.moveTo(50, 50);
+            ctx.lineTo(50, height - 20);
+            ctx.stroke();
+
+            // Draw points and line
+            ctx.strokeStyle = '#3498db';
+            ctx.lineWidth = 1.5;
+
+            // Step 1: Draw initial point
+            const point1X = 50 + (0 * (width - 100)) / 12;
+            const point1Y = height - 20 - (300 * (height - 40)) / 2000;
+            ctx.beginPath();
+            ctx.moveTo(point1X, point1Y);
+
+            // Step 2: Draw next point
+            const point2X = 50 + (4 * (width - 100)) / 12;
+            const point2Y = height - 20 - (900 * (height - 40)) / 2000;
+            ctx.lineTo(point2X, point2Y);
+
+            // Step 3: Draw next point
+            const point3X = 50 + (8 * (width - 100)) / 12;
+            const point3Y = height - 20 - (1500 * (height - 40)) / 2000;
+            ctx.lineTo(point3X, point3Y);
+
+            // Step 4: Draw last point
+            const point4X = 50 + (12 * (width - 100)) / 12;
+            const point4Y = height - 20 - (2000 * (height - 40)) / 2000;
+            ctx.lineTo(point4X, point4Y);
+
+            // Close path and stroke
+            ctx.stroke();
+        });
+    </script>
+</body>
+</html>
