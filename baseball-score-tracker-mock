@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Baseball Score Tracker</title>
+  <style>
+    body { font-family: 'Arial', sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background-color: #f5f5f5; }
+    .container { display: flex; flex-direction: column; align-items: center; }
+    h1 { color: #333; margin-bottom: 20px; }
+    .score-row { display: flex; justify-content: space-around; margin: 10px 0; }
+    .score-cell { text-align: center; min-width: 150px; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
+    button { padding: 8px 12px; font-size: 14px; margin: 5px; background-color: #4CAF50; color: white; border: none; cursor: pointer; }
+    button:hover { background-color: #45a049; }
+    #reset-button { background-color: #f44336; }
+    #reset-button:hover { background-color: #d32f2f; }
+  </style>
+  
+  
+  <script type="application/ld+json">
+{
+  "@context": "urn:goose.ai:schema",
+  "@type": "GooseApp",
+  "name": "baseball-score-tracker-mock",
+  "description": "A baseball score tracker using mock data for practice.",
+  "width": 800,
+  "height": 600,
+  "resizable": true,
+  "mcpServers": [
+    "apps"
+  ]
+}
+  </script>
+</head>
+<body>
+  <div class="container">
+    <h1>Baseball Score Tracker</h1>
+    <div class="score-row">
+      <div class="score-cell">Home: <span id="home-score">3</span></div>
+      <div class="score-cell">Away: <span id="away-score">2</span></div>
+    </div>
+    <button onclick="addHomeRun()">Add Home Run</button>
+    <button onclick="addAwayRun()">Add Away Run</button>
+    <button id="reset-button" onclick="resetScores()">Reset Scores</button>
+  </div>
+
+  <script>
+    let homeScore = 3;
+    let awayScore = 2;
+
+    function addHomeRun() {
+      homeScore++;
+      document.getElementById('home-score').textContent = homeScore;
+    }
+
+    function addAwayRun() {
+      awayScore++;
+      document.getElementById('away-score').textContent = awayScore;
+    }
+
+    function resetScores() {
+      homeScore = 0;
+      awayScore = 0;
+      document.getElementById('home-score').textContent = homeScore;
+      document.getElementById('away-score').textContent = awayScore;
+    }
+  </script>
+</body>
+</html>
