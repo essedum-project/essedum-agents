@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cricket Score Tracker</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f9f9f9;
+        }
+        h1 {
+            text-align: center;
+            color: #0066ff;
+        }
+        #scoreboard {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        .team {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .score {
+            font-size: 1.2em;
+            text-align: center;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 1em;
+            margin: 10px;
+        }
+        #visualization {
+            display: none;
+            width: 100%;
+        }
+        #visualization h2 {
+            text-align: center;
+        }
+        #run-rate-chart, #wicket-trend {
+            width: 100%;
+            height: 200px;
+            margin: 10px 0;
+        }
+        .view-toggle {
+            display: flex;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .view-toggle label {
+            margin-left: 5px;
+        }
+        .view-toggle input {
+            width: 20px;
+            height: 20px;
+        }
+    </style>
+  
+  
+  <script type="application/ld+json">
+{
+  "@context": "urn:goose.ai:schema",
+  "@type": "GooseApp",
+  "name": "cricket-score-tracker",
+  "description": "Real-time test match scoreboard with mock data generation and stats visualization.",
+  "width": 800,
+  "height": 600,
+  "resizable": true,
+  "mcpServers": [
+    "apps"
+  ]
+}
+  </script>
+</head>
+<body>
+    <h1>Cricket Score Tracker</h1>
+    <div id="scoreboard">
+        <div class="team">
+            <h2>Team A</h2>
+            <div class="score">Runs: <span id="teamA-runs">0</span> Wickets: <span id="teamA-wickets">0</span> Overs: <span id="teamA-overs">0.0</span></div>
+        </div>
+        <div class="team">
+            <h2>Team B</h2>
+            <div class="score">Runs: <span id="teamB-runs">0</span> W</div>
+        </div>
+    </div>
+    <button id="generate-data">Generate Mock Data</button>
+    <div id="visualization" style="display:none;">
+        <h2>Data Visualization</h2>
+        <div id="run-rate-chart"></div>
+        <div id="wicket-trend"></div>
+    </div>
+    <div class="view-toggle">
+        <label>
+            <input type="checkbox" id="toggle-view"> Toggle View
+        </label>
+    </div>
+    <script>
+        document.getElementById('generate-data').addEventListener('click', generateMockData);
+        document.getElementById('toggle-view').addEventListener('change', toggleView);
+
+        function generateMockData() {
+            const overs = 55;
+            let teamARuns = 0;
+            let teamAWickets = 0;
+            let teamAOver = 0.0;
+
+            for (let i = 0; i < overs; i++) {
+                const runs = Math.floor(Math.random() * 6);
+                teamARuns += runs;
+                if (Math.random() < 0.1) {
+                    teamAWickets++;
+                }
+                if (i % 6 === 0) {
+                    teamAOver = Math.floor(i / 6) + (i % 6) / 6;
+                }
+            }
+
+            document.getElementById('teamA-runs').textContent = teamARuns;
+            document.getElementById('teamA-wickets').textContent = teamAWickets;
+            document.getElementById('teamA-overs').textContent = teamAOver.toFixed(1);
+
+            document.getElementById('teamB-runs').textContent = Math.floor(Math.random() * 1500);
+            document.getElementById('teamB-wickets').textContent = Math.floor(Math.random() * 15);
+            document.getElementById('teamB-overs').textContent = (overs * 1.5).toFixed(1);
+
+            document.getElementById('visualization').style.display = 'block';
+            document.getElementById('scoreboard').style.display = 'none';
+        }
+
+        function toggleView() {
+            const scoreboardView = document.getElementById('scoreboard');
+            const visualizationView = document.getElementById('visualization');
+            if (scoreboardView.style.display === 'none') {
+                scoreboardView.style.display = 'block';
+                visualizationView.style.display = 'none';
+            } else {
+                scoreboardView.style.display = 'none';
+                visualizationView.style.display = 'block';
+            }
+        }
+    </script>
+</body>
+</html>
