@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Employee Management Mock</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        h1 {
+            color: #2c3e50;
+            text-align: center;
+        }
+        p {
+            text-align: center;
+            margin: 15px 0;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border: 1px solid #ddd;
+        }
+        th {
+            background-color: #f2f2f2;
+            font-weight: bold;
+        }
+        tr:hover {
+            background-color: #f5f5f5;
+        }
+        .button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            cursor: pointer;
+            margin: 10px 0;
+            width: 100%;
+            font-size: 16px;
+            border-radius: 4px;
+        }
+        .button:hover {
+            background-color: #45a049;
+        }
+        .error {
+            color: #e74c3c;
+            font-size: 14px;
+            text-align: center;
+            margin-top: 10px;
+            display: none;
+        }
+        @media (max-width: 600px) {
+            table, th, td {
+                display: block;
+            }
+            th {
+                position: relative;
+                top: -100%;
+                left: 50%;
+                width: 50%;
+                transform: translateX(-50%);
+                text-align: left;
+            }
+        }
+    </style>
+  
+  
+  <script type="application/ld+json">
+{
+  "@context": "urn:goose.ai:schema",
+  "@type": "GooseApp",
+  "name": "employee-management-mock",
+  "description": "Mock employee management system with name, position, department, and salary data.",
+  "width": 800,
+  "height": 600,
+  "resizable": true,
+  "mcpServers": [
+    "apps"
+  ]
+}
+  </script>
+</head>
+<body>
+    <h1>Employee Management System (Mock Data)</h1>
+    <p>This mock system displays employee data with name, position, department, and salary.</p>
+    <table id="employeeTable">
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Position</th>
+                <th>Department</th>
+                <th>Salary</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>John Doe</td>
+                <td>Manager</td>
+                <td>HR</td>
+                <td>$75,000</td>
+            </tr>
+            <tr>
+                <td>Jane Smith</td>
+                <td>Developer</td>
+                <td>Engineering</td>
+                <td>$90,000</td>
+            </tr>
+            <tr>
+                <td>Michael Johnson</td>
+                <td>Designer</td>
+                <td>Marketing</td>
+                <td>$65,000</td>
+            </tr>
+        </tbody>
+    </table>
+    <button class="button" id="addEmployee">Add New Employee</button>
+    <div id="error" class="error">Error adding employee. Please try again.</div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const addBtn = document.getElementById('addEmployee');
+            const errorDiv = document.getElementById('error');
+            const tableBody = document.querySelector('#employeeTable tbody');
+
+            addBtn.addEventListener('click', function() {
+                // Simulate adding a new random employee
+                const randomEmployee = {
+                    name: 'Employee ' + Math.floor(Math.random() * 100),
+                    position: ['Manager', 'Developer', 'Designer', 'Analyst', 'Engineer'][Math.floor(Math.random() * 5)],
+                    department: ['HR', 'Engineering', 'Marketing', 'Finance', 'Sales'][Math.floor(Math.random() * 5)],
+                    salary: '$' + (Math.floor(Math.random() * 50000) + 65000).toLocaleString('en-US')
+                };
+                
+                const newRow = document.createElement('tr');
+                newRow.innerHTML = `
+                    <td>${randomEmployee.name}</td>
+                    <td>${randomEmployee.position}</td>
+                    <td>${randomEmployee.department}</td>
+                    <td>${randomEmployee.salary}</td>
+                `;
+                tableBody.appendChild(newRow);
+
+                // Hide error message
+                errorDiv.style.display = 'none';
+            });
+
+            // Simulate error after 3 seconds
+            setTimeout(() => {
+                errorDiv.style.display = 'block';
+            }, 3000);
+        });
+    </script>
+</body>
+</html>

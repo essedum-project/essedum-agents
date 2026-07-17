@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Badminton Score Tracker</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+            color: #333;
+        }
+        
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        
+        h1 {
+            text-align: center;
+            color: #2c3e50;
+        }
+        
+        .scores {
+            display: flex;
+            justify-content: space-around;
+            margin: 20px 0;
+        }
+        
+        .score-section {
+            text-align: center;
+            padding: 10px;
+            border: 1px solid #e0e0e0;
+            border-radius: 5px;
+            width: 45%;
+        }
+        
+        .score-display {
+            font-size: 2rem;
+            font-weight: bold;
+            color: #2c3e50;
+            margin-top: 5px;
+        }
+        
+        .buttons {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            margin-top: 10px;
+        }
+        
+        .score-btn, .reset-btn {
+            padding: 8px 15px;
+            font-size: 16px;
+            cursor: pointer;
+            border: none;
+            border-radius: 4px;
+            background-color: #4CAF50;
+            color: white;
+            transition: background-color 0.3s;
+        }
+        
+        .score-btn:hover {
+            background-color: #45a049;
+        }
+        
+        .reset-btn {
+            background-color: #f44336;
+        }
+        
+        .reset-btn:hover {
+            background-color: #d32f2f;
+        }
+    </style>
+  
+  
+  <script type="application/ld+json">
+{
+  "@context": "urn:goose.ai:schema",
+  "@type": "GooseApp",
+  "name": "badminton-score-tracker-mock",
+  "description": "Interactive badminton score tracker with live scoring for mock matches",
+  "width": 800,
+  "height": 600,
+  "resizable": true,
+  "mcpServers": [
+    "apps"
+  ]
+}
+  </script>
+</head>
+<body>
+    <div class="container">
+        <h1>Badminton Score Tracker</h1>
+        <div class="scores">
+            <div class="score-section">
+                <h2>Player A</h2>
+                <div class="score-display">0</div>
+            </div>
+            <div class="score-section">
+                <h2>Player B</h2>
+                <div class="score-display">0</div>
+            </div>
+        </div>
+        <div class="buttons">
+            <button class="score-btn" data-player="A">+1</button>
+            <button class="score-btn" data-player="B">+1</button>
+            <button class="reset-btn">Reset</button>
+        </div>
+    </div>
+
+    <script>
+        let scoreA = 0;
+        let scoreB = 0;
+        
+        document.querySelectorAll('.score-btn').forEach(button => {
+            button.addEventListener('click', function() {
+                const player = this.getAttribute('data-player');
+                if (player === 'A') {
+                    scoreA++;
+                    document.querySelector('.score-section:nth-child(1) .score-display').textContent = scoreA;
+                } else {
+                    scoreB++;
+                    document.querySelector('.score-section:nth-child(2) .score-display').textContent = scoreB;
+                }
+            });
+        });
+        
+        document.querySelector('.reset-btn').addEventListener('click', function() {
+            scoreA = 0;
+            scoreB = 0;
+            document.querySelector('.score-section:nth-child(1) .score-display').textContent = '0';
+            document.querySelector('.score-section:nth-child(2) .score-display').textContent = '0';
+        });
+    </script>
+</body>
+</html>

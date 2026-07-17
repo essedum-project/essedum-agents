@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bird Sanctuary - Mock Data</title>
+    <link href="https://fonts.googleapis.com/css2?family=Lato:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Lato', sans-serif;
+            line-height: 1.6;
+            color: #333;
+            margin: 0;
+            padding: 0;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        header {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        header h1 {
+            font-size: 2.5em;
+            color: #2c3e50;
+        }
+        header p {
+            font-size: 1.1em;
+            color: #7f8c8d;
+        }
+        #birds-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            padding: 20px;
+        }
+        .card {
+            background: #fff;
+            border-radius: 10px;
+            padding: 15px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+            transition: transform 0.3s ease;
+        }
+        .card:hover {
+            transform: translateY(-5px);
+        }
+        .card img {
+            width: 100%;
+            height: auto;
+            border-radius: 8px;
+            margin-bottom: 10px;
+        }
+        .card h3 {
+            font-weight: 700;
+            color: #2c3e50;
+        }
+        .card p {
+            color: #7f8c8d;
+            font-size: 0.9em;
+        }
+        @media (max-width: 480px) {
+            .card {
+                padding: 12px;
+            }
+        }
+    </style>
+  
+  
+  <script type="application/ld+json">
+{
+  "@context": "urn:goose.ai:schema",
+  "@type": "GooseApp",
+  "name": "bird-sanctuary-mock",
+  "description": "Interactive simulation of a bird sanctuary with mock bird species data for educational purposes.",
+  "width": 800,
+  "height": 600,
+  "resizable": true,
+  "mcpServers": [
+    "apps"
+  ]
+}
+  </script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Bird Sanctuary</h1>
+            <p>Interactive simulation with mock bird species</p>
+        </header>
+        <main>
+            <section id="birds-container"></section>
+        </main>
+    </div>
+    <script>
+        try {
+            const mockBirds = [
+                { id: 1, name: "Sparrow", description: "A small bird often found in gardens", image: "https://via.placeholder.com/150" },
+                { id: 2, name: "Robin", description: "A common garden bird with red breast", image: "https://via.placeholder.com/150" },
+                { id: 3, name: "Eagle", description: "Powerful bird of prey", image: "https://via.placeholder.com/150" },
+                { id: 4, name: "Penguin", description: "Aquatic bird found in polar regions", image: "https://via.placeholder.com/150" },
+                { id: 5, name: "Swan", description: "Large water bird with long neck", image: "https://via.placeholder.com/150" }
+            ];
+
+            document.addEventListener('DOMContentLoaded', () => {
+                const birdsContainer = document.getElementById('birds-container');
+                mockBirds.forEach(bird => {
+                    const card = document.createElement('div');
+                    card.className = 'card';
+                    card.innerHTML = `\n                        <img src="${bird.image}" alt="${bird.name}">\n                        <h3>${bird.name}</h3>\n                        <p>${bird.description}</p>\n                    `;
+                    birdsContainer.appendChild(card);
+                });
+            });
+        } catch (error) {
+            console.error('Error initializing bird sanctuary app:', error);
+        }
+    </script>
+</body>
+</html>

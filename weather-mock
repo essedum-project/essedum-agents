@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Weather Mock</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap">
+  <style>
+    body {
+      font-family: 'Inter', sans-serif;
+      line-height: 1.6;
+      color: #333;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    .container {
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    input, button {
+      padding: 8px;
+      margin: 5px;
+    }
+    button {
+      background-color: #4CAF50;
+      color: white;
+      border: none;
+      cursor: pointer;
+      padding: 8px 15px;
+      border-radius: 4px;
+      transition: background-color 0.3s;
+    }
+    button:hover {
+      background-color: #45a049;
+    }
+    #weather-result {
+      margin-top: 20px;
+      padding: 15px;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      background-color: #f9f9f9;
+    }
+    @media (max-width: 600px) {
+      .container {
+        padding: 10px;
+      }
+      button {
+        width: 100%;
+        margin-bottom: 10px;
+      }
+    }
+  </style>
+  
+  
+  <script type="application/ld+json">
+{
+  "@context": "urn:goose.ai:schema",
+  "@type": "GooseApp",
+  "name": "weather-mock",
+  "description": "Weather app with client-side mock API for demo testing",
+  "width": 800,
+  "height": 600,
+  "resizable": true,
+  "mcpServers": [
+    "apps"
+  ]
+}
+  </script>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Weather Mock</h1>
+    </header>
+    <main>
+      <form id="weather-form">
+        <label for="location">Location:</label>
+        <input type="text" id="location" placeholder="e.g., New York">
+        <button type="button" id="check-weather">Check Weather</button>
+      </form>
+      <div id="weather-result"></div>
+    </main>
+  </div>
+  <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      const checkWeatherButton = document.getElementById('check-weather');
+      const locationInput = document.getElementById('location');
+      const weatherResult = document.getElementById('weather-result');
+
+      const mockWeatherData = async (location) => {
+        return new Promise((resolve) => {
+          setTimeout(() => {
+            const temperature = Math.floor(20 + Math.random() * 10);
+            const humidity = Math.floor(40 + Math.random() * 40);
+            const condition = ['Sunny', 'Rainy', 'Cloudy', 'Snowy'][
+              Math.floor(Math.random() * 4)
+            ];
+            resolve({
+              location,
+              temperature,
+              humidity,
+              condition
+            });
+          }, 800);
+        });
+      };
+
+      checkWeatherButton.addEventListener('click', async function() {
+        const location = locationInput.value.trim();
+        if (location === '') {
+          alert('Please enter a location');
+          return;
+        }
+
+        try {
+          const data = await mockWeatherData(location);
+          weatherResult.innerHTML = `
+            <p><strong>Location:</strong> ${data.location}</p>
+            <p><strong>Temperature:</strong> ${data.temperature}°C</p>
+            <p><strong>Humidity:</strong> ${data.humidity}%</p>
+            <p><strong>Condition:</strong> ${data.condition}</p>
+          `;
+        } catch (error) {
+          weatherResult.innerHTML = '<p class="error">Failed to fetch weather data. Please try again.</p>';
+        }
+      });
+    });
+  </script>
+</body>
+</html>
