@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gesture Step Monitor</title>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,400,700&display=swap">
+    <style>
+        body {
+            font-family: 'Roboto', sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f4f4f4;
+        }
+        h1 {
+            color: #333;
+        }
+        #step-count {
+            font-size: 2em;
+            color: #4CAF50;
+            margin: 20px;
+        }
+        .button {
+            padding: 10px 20px;
+            margin: 5px;
+            font-size: 1em;
+            cursor: pointer;
+            border: none;
+            border-radius: 5px;
+            background-color: #007BFF;
+            color: #fff;
+            transition: background-color 0.3s;
+        }
+        .button:hover {
+            background-color: #0056b3;
+        }
+        #analytics {
+            margin-top: 20px;
+            display: none;
+        }
+    </style>
+  <script type="application/ld+json">
+{
+  "@context": "urn:goose.ai:schema",
+  "@type": "GooseApp",
+  "name": "gesture-step-monitor",
+  "description": "Track and visualize steps using hand movement gestures with mock data.",
+  "width": 800,
+  "height": 600,
+  "resizable": true,
+  "mcpServers": [
+    "apps"
+  ]
+}
+  </script>
+  <script type="application/x-goose-prd">
+A step tracker app that tracks user steps and utilizes mock data for testing purposes. The app will feature hand movement tracking capabilities to record steps. Key features include: 1. User interface displaying step count. 2. Visualization of steps taken using hand movement gestures. 3. A mock data generator for simulating step counts. 4. Options to start, pause, and reset the step tracking. 5. Basic analytics on user steps over time.
+  </script>
+</head>
+<body>
+    <h1>Gesture Step Monitor</h1>
+    <div id="step-count">Steps: 0</div>
+    <button class="button" id="start-button">Start</button>
+    <button class="button" id="pause-button">Pause</button>
+    <button class="button" id="reset-button">Reset</button>
+    <div id="analytics"></div>
+
+    <script>
+        let stepCount = 0;
+        let isTracking = false;
+        let interval;
+
+        document.getElementById('start-button').addEventListener('click', function() {
+            if (!isTracking) {
+                isTracking = true;
+                stepCount = 0;
+                updateStepCount();
+                interval = setInterval(generateMockSteps, 1000);
+            }
+        });
+
+        document.getElementById('pause-button').addEventListener('click', function() {
+            if (isTracking) {
+                clearInterval(interval);
+                isTracking = false;
+                showAnalytics();
+            }
+        });
+
+        document.getElementById('reset-button').addEventListener('click', function() {
+            clearInterval(interval);
+            isTracking = false;
+            stepCount = 0;
+            updateStepCount();
+            document.getElementById('analytics').style.display = 'none';
+        });
+
+        function generateMockSteps() {
+            const mockSteps = Math.floor(Math.random() * 5) + 1;  // Simulates 1 to 5 steps
+            stepCount += mockSteps;
+            updateStepCount();
+        }
+
+        function updateStepCount() {
+            document.getElementById('step-count').innerText = 'Steps: ' + stepCount;
+        }
+
+        function showAnalytics() {
+            const analyticsDiv = document.getElementById('analytics');
+            analyticsDiv.style.display = 'block';
+            analyticsDiv.innerText = 'Total Steps: ' + stepCount;
+        }
+    </script>
+</body>
+</html>
