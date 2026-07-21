@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cricket Score Simulator</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 20px; }
+        .container { display: flex; flex-direction: column; gap: 20px; }
+        header { text-align: center; margin-bottom: 20px; }
+        h1 { color: #2c3e50; }
+        .score-card { background: #f8f9fa; border-radius: 8px; padding: 15px; border: 1px solid #e0e0e0; }
+        .team-score { display: flex; justify-content: space-between; align-items: center; margin: 10px 0; }
+        .team-name { font-weight: bold; color: #3498db; }
+        .score-value { font-size: 24px; font-weight: bold; color: #2c3e50; }
+        .overs-wickets { display: flex; justify-content: space-between; margin-top: 5px; }
+        .overs { font-weight: bold; color: #2980b9; }
+        .wickets { display: inline-block; background: #e74c3c; color: white; padding: 3px 8px; border-radius: 4px; }
+        .form-group { display: flex; flex-direction: column; gap: 8px; }
+        input, button { padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
+        button { background: #3498db; color: white; cursor: pointer; font-weight: bold; transition: background 0.3s; }
+        button:hover { background: #2980b9; }
+        .status-bar { text-align: center; font-size: 14px; color: #7f8c8d; margin-top: 20px; }
+        .progress-bar { height: 10px; background: #e0e0e0; border-radius: 5px; margin-top: 10px; }
+        .progress-fill { height: 100%; background: #3498db; width: 0%; }
+    </style>
+  
+  
+  <script type="application/ld+json">
+{
+  "@context": "urn:goose.ai:schema",
+  "@type": "GooseApp",
+  "name": "cricket-score-simulator",
+  "description": "Real-time cricket score tracker with mock data for testing match updates.",
+  "width": 800,
+  "height": 600,
+  "resizable": false,
+  "mcpServers": [
+    "apps"
+  ]
+}
+  </script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Cricket Score Simulator</h1>
+        </header>
+        <div class="score-card">
+            <div class="team-score">
+                <span class="team-name">Team A</span>
+                <span class="score-value" id="team-a-score">123/4 (10.5)</span>
+            </div>
+            <div class="overs-wickets">
+                <span class="overs">Overs: 10.5</span>
+                <span class="wickets">Wickets: 4</span>
+            </div>
+        </div>
+        <div class="score-card">
+            <div class="team-score">
+                <span class="team-name">Team B</span>
+                <span class="score-value" id="team-b-score">89/2 (8.2)</span>
+            </div>
+            <div class="overs-wickets">
+                <span class="overs">Overs: 8.2</span>
+                <span class="wickets">Wickets: 2</span>
+            </div>
+        </div>
+        <div class="form-group">
+            <label for="runs">Runs for Team A</label>
+            <input type="number" id="runs" min="0" value="10">
+        </div>
+        <div class="form-group">
+            <label for="wickets">Wickets for Team B</label>
+            <input type="number" id="wickets" min="0" value="2">
+        </div>
+        <button id="update-btn">Update Score</button>
+        <div class="status-bar">Real-time mock cricket score tracker for testing purposes</div>
+        <div class="progress-bar">
+            <div class="progress-fill"></div>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const updateBtn = document.getElementById('update-btn');
+            const teamAScore = document.getElementById('team-a-score');
+            const teamBScore = document.getElementById('team-b-score');
+            const runsInput = document.getElementById('runs');
+            const wicketsInput = document.getElementById('wickets');
+
+            // Initial mock data
+            let teamA = { runs: 123, wickets: 4, overs: 10.5 };
+            let teamB = { runs: 89, wickets: 2, overs: 8.2 };
+
+            updateBtn.addEventListener('click', function() {
+                const newRuns = parseInt(runsInput.value) || 0;
+                const newWickets = parseInt(wicketsInput.value) || 0;
+
+                // Update scores
+                teamA.runs += newRuns;
+                teamB.wickets += newWickets;
+
+                // Update displayed values
+                teamAScore.textContent = `${teamA.runs}/${teamA.wickets} (${teamA.overs.toFixed(1)})`;
+                teamBScore.textContent = `${teamB.runs}/${teamB.wickets} (${teamB.overs.toFixed(1)})`;
+
+                // Update the progress bar (just a mock)
+                const progress = (teamA.runs / (teamB.runs + 100)) * 100;
+                document.querySelector('.progress-fill').style.width = `${progress}%`;
+            });
+
+            // Initial display
+            teamAScore.textContent = `${teamA.runs}/${teamA.wickets} (${teamA.overs.toFixed(1)})`;
+            teamBScore.textContent = `${teamB.runs}/${teamB.wickets} (${teamB.overs.toFixed(1)})`;
+        });
+    </script>
+</body>
+</html>

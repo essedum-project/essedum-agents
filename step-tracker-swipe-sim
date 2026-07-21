@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Step Tracker</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: 20px;
+            color: #333;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f9f9f9;
+            border-radius: 10px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+        }
+        h1 {
+            text-align: center;
+            color: #2c3e50;
+            margin-bottom: 20px;
+        }
+        .stats {
+            display: flex;
+            justify-content: space-around;
+            flex-wrap: wrap;
+            margin-bottom: 20px;
+        }
+        .stat-item {
+            padding: 10px;
+            background-color: #e8f4fc;
+            border-radius: 5px;
+            width: 30%;
+            text-align: center;
+            transition: background-color 0.3s ease;
+        }
+        .swipe-area {
+            height: 100px;
+            width: 100%;
+            background-color: #d8e8f9;
+            border-radius: 10px;
+            margin: 10px 0;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        .swipe-area:active {
+            background-color: #c2d1e8;
+        }
+        .instructions {
+            text-align: center;
+            color: #7f8c8d;
+            font-style: italic;
+            margin-top: 5px;
+        }
+        @media (max-width: 600px) {
+            .stat-item {
+                width: 45%;
+            }
+            .swipe-area {
+                height: 80px;
+            }
+        }
+    </style>
+  
+  
+  <script type="application/ld+json">
+{
+  "@context": "urn:goose.ai:schema",
+  "@type": "GooseApp",
+  "name": "step-tracker-swipe-sim",
+  "description": "Real-time step tracker with swipe gestures (left: -1 step, right: +1 step)",
+  "width": 800,
+  "height": 600,
+  "resizable": true,
+  "mcpServers": [
+    "apps"
+  ]
+}
+  </script>
+</head>
+<body>
+    <div class="container">
+        <h1>Step Tracker</h1>
+        <div class="stats">
+            <div class="stat-item">Steps: <span id="steps">0</span></div>
+            <div class="stat-item">Distance: <span id="distance">0.00 m</span></div>
+            <div class="stat-item">Pace: <span id="pace">0 steps/min</span></div>
+        </div>
+        <div class="swipe-area" id="swipe-area"></div>
+        <p class="instructions">Swipe left to decrease steps, right to increase steps.</p>
+    </div>
+
+    <script>
+        let stepCount = 0;
+        const stepsEl = document.getElementById('steps');
+        const distanceEl = document.getElementById('distance');
+        const paceEl = document.getElementById('pace');
+
+        function updateStats() {
+            const steps = stepCount;
+            const distance = steps * 0.75;
+            const pace = steps * 60;
+            
+            stepsEl.textContent = steps;
+            distanceEl.textContent = `${distance.toFixed(2)} m`;
+            paceEl.textContent = `${pace} steps/min`;
+        }
+
+        const swipeArea = document.getElementById('swipe-area');
+
+        swipeArea.addEventListener('touchstart', (e) => {
+            swipeArea.startX = e.touches[0].screenX;
+        });
+
+        swipeArea.addEventListener('touchend', (e) => {
+            if (swipeArea.startX) {
+                const endX = e.changedTouches[0].screenX;
+                const diff = endX - swipeArea.startX;
+
+                if (diff > 50) {
+                    stepCount++;
+                    updateStats();
+                } else if (diff < -50) {
+                    stepCount--;
+                    updateStats();
+                }
+                swipeArea.startX = null;
+            }
+        });
+
+        updateStats();
+    </script>
+</body>
+</html>

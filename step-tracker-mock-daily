@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Step Tracker</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; background-color: #f5f5f5; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { text-align: center; color: #333; }
+        .chart-container { height: 300px; margin: 20px 0; }
+        button { padding: 10px 15px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; margin: 10px 0; }
+        button:hover { background: #45a049; }
+    </style>
+  
+  
+  <script type="application/ld+json">
+{
+  "@context": "urn:goose.ai:schema",
+  "@type": "GooseApp",
+  "name": "step-tracker-mock-daily",
+  "description": "Generates random step counts for 7 days with bar chart and refresh button.",
+  "width": 800,
+  "height": 600,
+  "resizable": false,
+  "mcpServers": [
+    "apps"
+  ]
+}
+  </script>
+</head>
+<body>
+    <div class="container">
+        <h1>Step Tracker</h1>
+        <div id="chart-container" class="chart-container"></div>
+        <button id="refresh-btn">Refresh Mock Data</button>
+    </div>
+
+    <script>
+        function generateMockData() {
+            const days = 7;
+            const minSteps = 5000;
+            const maxSteps = 20000;
+            const data = [];
+            for (let i = 0; i < days; i++) {
+                data.push(Math.floor(Math.random() * (maxSteps - minSteps + 1)) + minSteps);
+            }
+            return data;
+        }
+
+        function renderChart(data) {
+            const chartContainer = document.getElementById('chart-container');
+            chartContainer.innerHTML = '';
+
+            const maxSteps = Math.max(...data);
+
+            const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            svg.setAttribute('width', '600');
+            svg.setAttribute('height', '300');
+            svg.setAttribute('viewBox', `0 0 600 300`);
+
+            for (let i = 0; i < data.length; i++) {
+                const bar = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+                bar.setAttribute('x', i * 50);
+                bar.setAttribute('y', 300 - (data[i] / maxSteps * 200));
+                bar.setAttribute('width', '20');
+                bar.setAttribute('height', (data[i] / maxSteps * 200));
+                bar.setAttribute('fill', '#3498db');
+                svg.appendChild(bar);
+            }
+
+            chartContainer.appendChild(svg);
+        }
+
+        document.getElementById('refresh-btn').addEventListener('click', () => {
+            try {
+                renderChart(generateMockData());
+            } catch (e) {
+                alert(`Error: ${e.message}`);
+            }
+        });
+
+        renderChart(generateMockData());
+    </script>
+</body>
+</html>

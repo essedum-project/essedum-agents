@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Persistent Todo List</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        h1 {
+            color: #2c3e50;
+            text-align: center;
+        }
+        .input-group {
+            display: flex;
+            margin-bottom: 15px;
+            flex-direction: column;
+        }
+        #taskInput {
+            padding: 8px;
+            font-size: 16px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            width: 100%;
+        }
+        #addButton {
+            padding: 8px 12px;
+            background-color: #3498db;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        #addButton:hover {
+            background-color: #2980b9;
+        }
+        #taskList {
+            list-style: none;
+            padding: 0;
+        }
+        #taskList li {
+            padding: 8px;
+            margin-bottom: 5px;
+            border-radius: 4px;
+            border-left: 3px solid #3498db;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        li.completed {
+            color: #7f8c8d;
+            text-decoration: line-through;
+            background-color: #f9f9f9;
+        }
+        .delete-btn {
+            color: #e74c3c;
+            cursor: pointer;
+            font-weight: bold;
+            margin-left: 5px;
+        }
+        li.completed .delete-btn {
+            color: #95a5a6;
+        }
+    </style>
+  
+  
+  <script type="application/ld+json">
+{
+  "@context": "urn:goose.ai:schema",
+  "@type": "GooseApp",
+  "name": "persistent-todo-list",
+  "description": "Simple to-do app with local storage for persistent tasks",
+  "width": 800,
+  "height": 600,
+  "resizable": true,
+  "mcpServers": [
+    "apps"
+  ]
+}
+  </script>
+</head>
+<body>
+    <h1>Persistent Todo List</h1>
+    <div class="input-group">
+        <input type="text" id="taskInput" placeholder="Add a new task...">
+        <button id="addButton">Add Task</button>
+    </div>
+    <ul id="taskList"></ul>
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const taskInput = document.getElementById('taskInput');
+            const addButton = document.getElementById('addButton');
+            const taskList = document.getElementById('taskList');
+
+            // Load tasks from local storage
+            let tasks = JSON.parse(localStorage.getItem('todoTasks')) || [];
+
+            // Function to render tasks
+            function renderTasks() {
+                taskList.innerHTML = '';
+                tasks.forEach(task => {
+                    const li = document.createElement('li');
+                    li.className = `task-item ${task.completed ? 'completed' : ''}`;
+                    
+                    // Create task text
+                    const taskText = document.createTextNode(task.text);
+                    li.appendChild(taskText);
+
+                    // Create delete button
+                    const deleteBtn = document.createElement('span');
+                    deleteBtn.className = 'delete-btn';
+                    deleteBtn.textContent = 'Delete';
+                    deleteBtn.addEventListener('click', () => {
+                        tasks = tasks.filter(t => t.text !== task.text);
+                        localStorage.setItem('todoTasks', JSON.stringify(tasks));
+                        renderTasks();
+                    });
+
+                    li.appendChild(deleteBtn);
+                    taskList.appendChild(li);
+                });
+            }
+
+            // Function to toggle task completion
+            function toggleComplete(event) {
+                const taskItem = event.target.closest('.task-item');
+                const taskText = taskItem.firstChild;
+                const isCompleted = taskText.classList.contains('completed');
+                taskText.classList.toggle('completed');
+                const index = tasks.findIndex(t => t.text === taskText.textContent);
+                if (index !== -1) {
+                    tasks[index].completed = !isCompleted;
+                    localStorage.setItem('todoTasks', JSON.stringify(tasks));
+                }
+            }
+
+            // Event listeners
+            addButton.addEventListener('click', () => {
+                const newText = taskInput.value.trim();
+                if (newText) {
+                    tasks.push({ text: newText, completed: false });
+                    localStorage.setItem('todoTasks', JSON.stringify(tasks));
+                    taskInput.value = '';
+                    renderTasks();
+                }
+            });
+
+            taskInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    addButton.click();
+                }
+            });
+
+            // Render initial tasks
+            renderTasks();
+
+            // Attach event listeners to tasks for completion
+            taskList.addEventListener('click', (event) => {
+                if (event.target.closest('.task-item')) {
+                    toggleComplete(event);
+                }
+            });
+        });
+    </script>
+</body>
+</html>
