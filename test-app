@@ -1,0 +1,1 @@
+<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Test App</title><script type="application/ld+json">{"@context":"https://goose.ai/schema","@type":"GooseApp","name":"test-app","description":"Test app for list_apps validation","width":800,"height":600,"resizable":true}</script></head><body><h1>Test App</h1></body></html>
