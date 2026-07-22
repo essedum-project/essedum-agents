@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Seattle Weather</title>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Roboto', sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f0f4f8;
+            color: #333;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+        .container {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            padding: 20px;
+            width: 320px;
+            max-width: 100%;
+        }
+        h1 {
+            font-size: 24px;
+            margin-bottom: 10px;
+            text-align: center;
+        }
+        .weather-card {
+            background: #e1f5fe;
+            border-radius: 8px;
+            padding: 10px;
+            margin-bottom: 10px;
+        }
+        .weather-card p {
+            margin: 5px 0;
+        }
+    </style>
+  <script type="application/ld+json">
+{
+  "@context": "urn:goose.ai:schema",
+  "@type": "GooseApp",
+  "name": "seattle-weather",
+  "description": "Displays the weekly weather forecast for Seattle with mock data.",
+  "width": 400,
+  "height": 600,
+  "resizable": false,
+  "mcpServers": [
+    "apps"
+  ]
+}
+  </script>
+  <script type="application/x-goose-prd">
+Create an app to display Seattle city weather for the week with mock data. The app should include a user interface showing weather details such as temperature, humidity, wind speed, and brief forecasts for each day.
+  </script>
+</head>
+<body>
+    <div class="container">
+        <h1>Seattle Weather</h1>
+        <div id="weather-data"></div>
+    </div>
+
+    <script>
+        // Mock weather data
+        const weatherData = [
+            { day: 'Monday', temperature: '12°C', humidity: '82%', wind: '5km/h', forecast: 'Cloudy' },
+            { day: 'Tuesday', temperature: '13°C', humidity: '78%', wind: '6km/h', forecast: 'Rainy' },
+            { day: 'Wednesday', temperature: '14°C', humidity: '75%', wind: '4km/h', forecast: 'Sunny' },
+            { day: 'Thursday', temperature: '15°C', humidity: '73%', wind: '7km/h', forecast: 'Partly cloudy' },
+            { day: 'Friday', temperature: '13°C', humidity: '80%', wind: '8km/h', forecast: 'Showers' },
+            { day: 'Saturday', temperature: '11°C', humidity: '85%', wind: '5km/h', forecast: 'Cloudy' },
+            { day: 'Sunday', temperature: '10°C', humidity: '90%', wind: '6km/h', forecast: 'Rain' }
+        ];
+
+        // Function to display weather data
+        function displayWeather() {
+            const weatherDataContainer = document.getElementById('weather-data');
+            weatherData.forEach(day => {
+                const weatherCard = document.createElement('div');
+                weatherCard.className = 'weather-card';
+                weatherCard.innerHTML = `
+                    <h3>${day.day}</h3>
+                    <p>Temperature: ${day.temperature}</p>
+                    <p>Humidity: ${day.humidity}</p>
+                    <p>Wind Speed: ${day.wind}</p>
+                    <p>Forecast: ${day.forecast}</p>
+                `;
+                weatherDataContainer.appendChild(weatherCard);
+            });
+        }
+
+        // Call the function to display weather
+        displayWeather();
+    </script>
+</body>
+</html>
